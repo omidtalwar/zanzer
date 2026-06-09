@@ -1,0 +1,33 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Claude Code local settings (personal overrides)
+.claude/settings.local.json
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Runtime state (lock file, db, etc.)
+data/
+
+# Local terminal-farm clones
+terminals/
+
+# MT5 compiled artifacts
+*.ex5
+mt5/ea/*.log

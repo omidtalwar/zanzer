@@ -1,0 +1,30 @@
+# Zanzer — AI Trading Guardian (V1: Trading Protection System)
+#
+# Pins are minimums (>=), not exact (==), on purpose: this machine runs
+# Python 3.14, and older pinned versions of pydantic-core (a Rust extension)
+# have no 3.14 wheel and would try to compile from source. Lower bounds pick
+# the oldest releases that ship prebuilt cp314 wheels.
+fastapi>=0.115
+uvicorn[standard]>=0.34
+pydantic>=2.12          # 2.12+ ships pydantic-core wheels for Python 3.14
+pydantic-settings>=2.7
+httpx>=0.28
+python-dotenv>=1.0
+
+# MetaTrader 5 integration (Windows only). Has a cp314 wheel as of 5.0.5735.
+MetaTrader5
+
+# --- Phase A: multi-user data layer ---
+sqlalchemy[asyncio]>=2.0
+aiosqlite>=0.20          # async SQLite driver for local dev
+cryptography>=43         # Fernet encryption for stored MT5 credentials
+alembic>=1.13           # database migrations (production)
+# Production (PostgreSQL) — install on the Linux server, not needed for local dev:
+#   asyncpg>=0.30
+# and set DATABASE_URL=postgresql+asyncpg://user:pass@host/db
+
+# MetaTrader 5 integration (Windows only).
+# NOTE: official wheels may lag the newest Python. If install fails on this
+# Python version, use Python 3.12. Version pin left loose to grab whatever
+# wheel exists for the interpreter in use.
+MetaTrader5

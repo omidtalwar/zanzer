@@ -1,0 +1,731 @@
+"""Bot command dispatcher — pure logic, framework-free.
+
+`send`/`delete` are injected so this is unit-testable without hitting Telegram.
+Holds a small in-memory FSM for the multi-step /link flow (fine for a single
+long-polling process).
+
+Commands:
+  user : /start /help /status /link /risk /lock /unlock /subscribe /paid /cancel
+  admin: /pending /verify <id> /activate <telegram_id> <days> [plan] /users
+"""
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime, timezone
+from html import escape
+
+from backend import repositories as repo
+from backend.config import settings
+from backend.db.session import SessionLocal
+from backend.logging_config import get_logger
+
+log = get_logger("bot")
+
+DISCLAIMER = (
+    "<b>🛡️ Zanzer — AI Trading Guardian</b>\n"
+    "I protect your trading capital by enforcing <b>your own</b> risk rules on MetaTrader 5.\n\n"
+    "<b>What I do</b>\n"
+    "• Watch your account &amp; risk limits (daily loss, trades, exposure)\n"
+    "• Lock / close to stop you when you break your own rules\n\n"
+    "<b>What I do NOT do</b>\n"
+    "• I do <b>NOT</b> open or place trades for you\n"
+    "• I do <b>NOT</b> send buy/sell signals or tips\n"
+    "• I do <b>NOT</b> give financial advice or manage your money\n"
+    "• I never trade on your behalf — <b>you stay in full control</b>\n\n"
+    "⚠️ <i>Trading is risky and you are fully responsible for your account and "
+    "decisions. Risk management always overrides everything. This is not financial advice.</i>"
+)
+
+HELP = (
+    "<b>Commands</b>\n"
+    "/status — your account, subscription &amp; risk\n"
+    "/link — connect your MT5 account\n"
+    "/risk — view your risk rules\n"
+    "/setrisk — set your rules (I guide you step by step)\n"
+    "/lock — lock yourself for the rest of today\n"
+    "/subscribe — pay with crypto (auto)\n"
+    "/stars — pay with Telegram Stars ⭐\n"
+    "/paid &lt;tx_hash&gt; — submit a manual payment\n"
+    "/help — this message\n\n"
+    "<i>Note: a lock can't be removed on demand — that's by design, to protect "
+    "you from emotional trading. It clears automatically at the next trading day.</i>"
+)
+
+
+def _esc(v) -> str:
+    return escape(str(v))
+
+
+def _ago(ts: datetime) -> str:
+    if ts is None:
+        return "never"
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    secs = (datetime.now(timezone.utc) - ts).total_seconds()
+    if secs < 60:
+        return f"{int(secs)}s ago"
+    if secs < 3600:
+        return f"{int(secs // 60)}m ago"
+    return f"{int(secs // 3600)}h ago"
+
+
+class BotDispatcher:
+    def __init__(self, send, delete=None, validator=None, provisioner=None,
+                 invoicer=None, star_invoicer=None, session_factory=SessionLocal) -> None:
+        self.send = send            # async (chat_id, text) -> bool
+        self.delete = delete        # async (chat_id, message_id) -> bool | None
+        self.validator = validator  # async (account_id) -> (ok: bool, message: str)
+        self.provisioner = provisioner  # async (account_id) -> str
+        self.invoicer = invoicer    # async (telegram_id, plan) -> (ok: bool, url_or_msg)
+        self.star_invoicer = star_invoicer  # async (telegram_id, plan) -> (ok, msg)
+        self._sf = session_factory
+        self.states: dict[int, dict] = {}
+
+    # ------------------------------------------------------------------ entry
+    async def handle(self, *, telegram_id: int, username: str | None,
+                     text: str | None, message_id: int | None = None) -> None:
+        text = (text or "").strip()
+
+        # Mid-conversation input (not a command) → feed the active flow.
+        state = self.states.get(telegram_id)
+        if state and not text.startswith("/"):
+            if state.get("flow") == "setrisk":
+                await self._setrisk_step(telegram_id, text)
+            else:
+                await self._link_step(telegram_id, text, message_id)
+            return
+
+        if not text.startswith("/"):
+            await self.send(telegram_id, "Type /help to see what I can do.")
+            return
+
+        cmd, _, arg = text.partition(" ")
+        cmd = cmd.lstrip("/").split("@", 1)[0].lower()
+        arg = arg.strip()
+
+        if cmd == "cancel":
+            self.states.pop(telegram_id, None)
+            await self.send(telegram_id, "Cancelled.")
+            return
+
+        handlers = {
+            "start": self._start, "agree": self._agree, "help": self._help, "status": self._status,
+            "link": self._link_start, "risk": self._risk, "setrisk": self._setrisk,
+            "lock": self._lock, "unlock": self._unlock, "subscribe": self._subscribe,
+            "paid": self._paid, "stars": self._stars,
+            # admin
+            "pending": self._admin_pending, "verify": self._admin_verify,
+            "activate": self._admin_activate, "users": self._admin_users,
+            "accounts": self._admin_accounts, "provision": self._admin_provision,
+            "broadcast": self._admin_broadcast,
+        }
+        handler = handlers.get(cmd)
+        if handler is None:
+            await self.send(telegram_id, "Unknown command. /help")
+            return
+        await handler(telegram_id, username, arg)
+
+    def _is_admin(self, telegram_id: int) -> bool:
+        return telegram_id in settings.admin_ids
+
+    # ------------------------------------------------------------- user cmds
+    async def _start(self, telegram_id, username, arg) -> None:
+        async with self._sf() as session:
+            user = await repo.register_user(session, telegram_id, username)
+            accepted = user.tos_accepted_at is not None
+            active = repo.subscription_is_active(user.subscription)
+        if not accepted:
+            tail = (
+                "By continuing you confirm you have read and accept these terms.\n"
+                "👉 Reply <b>/agree</b> to accept and start."
+            )
+            await self.send(telegram_id, f"{DISCLAIMER}\n\n{tail}")
+            return
+        if active:
+            tail = "Your subscription is active. /link your MT5 account, then /status."
+        else:
+            tail = (
+                "Your subscription is <b>inactive</b>.\n"
+                "To start protecting your account:\n"
+                "1) /link your MT5 account\n"
+                "2) /subscribe (crypto) or /stars to activate\n\n"
+                "/help for all commands."
+            )
+        await self.send(telegram_id, f"{DISCLAIMER}\n\n{tail}")
+
+    async def _agree(self, telegram_id, username, arg) -> None:
+        async with self._sf() as session:
+            user = await repo.register_user(session, telegram_id, username)
+            await repo.accept_tos(session, user)
+        await self.send(
+            telegram_id,
+            "✅ <b>Terms accepted.</b> Thank you.\n\nNext:\n"
+            "1) /link your MT5 account\n"
+            "2) /setrisk to set your risk rules (I'll guide you)\n"
+            "3) /subscribe (crypto) or /stars to activate protection\n\n"
+            "/help for all commands.",
+        )
+
+    async def _help(self, telegram_id, username, arg) -> None:
+        await self.send(telegram_id, HELP)
+
+    async def _status(self, telegram_id, username, arg) -> None:
+        async with self._sf() as session:
+            user = await repo.get_user(session, telegram_id)
+            if user is None:
+                await self.send(telegram_id, "You're not registered yet. Send /start.")
+                return
+            active = repo.subscription_is_active(user.subscription)
+            rs = user.risk_settings
+            accounts = user.accounts
+            lock = await repo.get_lock(session, user.id)
+            snap = await repo.get_snapshot(session, user.id)
+        lines = [
+            "<b>📊 Your Status</b>",
+            f"Subscription: <b>{'active' if active else 'inactive'}</b> ({_esc(user.subscription.status)})",
+        ]
+        if user.subscription.expires_at:
+            lines.append(f"Expires: {_esc(str(user.subscription.expires_at)[:10])}")
+        if accounts:
+            a = accounts[0]
+            lines.append(f"MT5: <b>{_esc(a.login)}</b> @ {_esc(a.server)} ({_esc(a.status)})")
+            if a.status == "needs_terminal":
+                lines.append(
+                    "⚠️ <i>This account is waiting for its own MT5 terminal "
+                    "(provisioning) before monitoring can start.</i>"
+                )
+        else:
+            lines.append("MT5: <i>not linked</i> — use /link")
+        lines.append(f"Trading: {'🔒 LOCKED' if lock.locked else '🟢 unlocked'}")
+
+        # Live data from the worker's latest snapshot.
+        if snap is not None:
+            lines.append("")
+            lines.append(f"💰 Balance: <b>{snap.balance:,.2f} {_esc(snap.currency)}</b>")
+            lines.append(f"📈 Equity: <b>{snap.equity:,.2f} {_esc(snap.currency)}</b>")
+            lines.append(f"Open trades: <b>{snap.open_positions}</b> (floating {snap.floating_pnl:+,.2f})")
+            lines.append(
+                f"Today's PnL: <b>{snap.daily_loss:+,.2f} {_esc(snap.currency)}</b> "
+                f"({snap.daily_loss_pct:+.2f}%)"
+            )
+            lines.append(
+                f"Trades today: {snap.trades_today}/{rs.max_trades_per_day} · "
+                f"Streak losses: {snap.consecutive_losses}/{rs.max_consecutive_losses} · "
+                f"Exposure: {snap.exposure_pct:.2f}%"
+            )
+            lines.append(f"Risk: {'🔴 LIMIT HIT' if snap.any_limit_hit else '🟢 OK'}")
+            lines.append(f"<i>Updated {_ago(snap.updated_at)}</i>")
+        else:
+            lines.append(
+                f"\nRisk rules: {rs.max_trades_per_day} trades/day, {rs.max_daily_loss_pct:.0f}% "
+                f"daily loss, {rs.max_consecutive_losses} losses, {rs.max_account_exposure_pct:.0f}% exposure"
+            )
+            lines.append("<i>Live balance/PnL appears once your account worker connects (~1 min).</i>")
+        await self.send(telegram_id, "\n".join(lines))
+
+    async def _risk(self, telegram_id, username, arg) -> None:
+        async with self._sf() as session:
+            user = await repo.get_user(session, telegram_id)
+            if user is None:
+                await self.send(telegram_id, "Send /start first.")
+                return
+            rs = user.risk_settings
+        usd = getattr(rs, "max_daily_loss_usd", 0.0) or 0.0
+        daily = (f"{rs.max_daily_loss_pct:g}%" if rs.max_daily_loss_pct > 0 else "off")
+        daily_usd = (f"{usd:g} (account currency)" if usd > 0 else "off")
+        await self.send(
+            telegram_id,
+            "<b>🛡️ Your risk rules</b>\n"
+            f"• Max trades/day: <b>{rs.max_trades_per_day}</b>\n"
+            f"• Max daily loss %: <b>{daily}</b>\n"
+            f"• Max daily loss $: <b>{daily_usd}</b>\n"
+            f"• Max risk/trade: <b>{rs.max_risk_per_trade_pct:g}%</b>\n"
+            f"• Max consecutive losses: <b>{rs.max_consecutive_losses}</b>\n"
+            f"• Max exposure: <b>{rs.max_account_exposure_pct:g}%</b>\n\n"
+            "👉 To change them, send /setrisk and I'll ask one simple question at a time.",
+        )
+
+    # --- /setrisk guided wizard --------------------------------------------
+    _SETRISK_STEPS = ["trades", "dailyloss", "riskpertrade", "losses", "exposure"]
+
+    def _daily_loss_desc(self, data: dict) -> str:
+        if data["max_daily_loss_usd"] > 0:
+            return f"{data['max_daily_loss_usd']:g} (account currency)"
+        if data["max_daily_loss_pct"] > 0:
+            return f"{data['max_daily_loss_pct']:g}%"
+        return "off"
+
+    def _setrisk_prompt(self, step: str, data: dict) -> str:
+        if step == "trades":
+            return (f"<b>1/5 — Max trades per day?</b>\nNow: <b>{data['max_trades_per_day']}</b>\n"
+                    "Reply a number (e.g. <b>2</b>), or <i>skip</i> to keep it.")
+        if step == "dailyloss":
+            return (f"<b>2/5 — Max daily loss?</b>\nNow: <b>{self._daily_loss_desc(data)}</b>\n"
+                    "Reply <b>5%</b> (percent) or <b>50$</b> (dollars), <i>off</i> to disable, or <i>skip</i>.")
+        if step == "riskpertrade":
+            return (f"<b>3/5 — Max risk per trade (%)?</b>\nNow: <b>{data['max_risk_per_trade_pct']:g}%</b>\n"
+                    "Reply a number (e.g. <b>2</b>), or <i>skip</i>.")
+        if step == "losses":
+            return (f"<b>4/5 — Max losing trades in a row?</b>\nNow: <b>{data['max_consecutive_losses']}</b>\n"
+                    "Reply a number (e.g. <b>2</b>), or <i>skip</i>.")
+        return (f"<b>5/5 — Max account exposure (%)?</b>\nNow: <b>{data['max_account_exposure_pct']:g}%</b>\n"
+                "Reply a number (e.g. <b>5</b>), <i>off</i>, or <i>skip</i>.")
+
+    async def _setrisk(self, telegram_id, username, arg) -> None:
+        async with self._sf() as session:
+            user = await repo.get_user(session, telegram_id)
+            if user is None:
+                await self.send(telegram_id, "Send /start first.")
+                return
+            rs = user.risk_settings
+            data = {
+                "max_trades_per_day": rs.max_trades_per_day,
+                "max_daily_loss_pct": rs.max_daily_loss_pct,
+                "max_daily_loss_usd": getattr(rs, "max_daily_loss_usd", 0.0) or 0.0,
+                "max_risk_per_trade_pct": rs.max_risk_per_trade_pct,
+                "max_consecutive_losses": rs.max_consecutive_losses,
+                "max_account_exposure_pct": rs.max_account_exposure_pct,
+            }
+        self.states[telegram_id] = {"flow": "setrisk", "step": 0, "data": data}
+        await self.send(
+            telegram_id,
+            "<b>⚙️ Set your risk rules</b>\nI'll ask 5 quick questions. "
+            "Reply <i>skip</i> to keep any value, or /cancel to stop.\n\n"
+            + self._setrisk_prompt("trades", data),
+        )
+
+    async def _setrisk_step(self, telegram_id, text) -> None:
+        state = self.states.get(telegram_id)
+        if not state:
+            return
+        idx = state["step"]
+        data = state["data"]
+        step = self._SETRISK_STEPS[idx]
+        t = text.strip().lower()
+
+        if t not in ("skip", "keep"):
+            err = self._apply_setrisk_answer(step, t, data)
+            if err:
+                await self.send(telegram_id, f"{err}\n\n{self._setrisk_prompt(step, data)}")
+                return
+
+        idx += 1
+        if idx < len(self._SETRISK_STEPS):
+            state["step"] = idx
+            await self.send(telegram_id, self._setrisk_prompt(self._SETRISK_STEPS[idx], data))
+            return
+
+        # Done — save everything.
+        self.states.pop(telegram_id, None)
+        async with self._sf() as session:
+            user = await repo.get_user(session, telegram_id)
+            if user is not None:
+                await repo.update_risk_settings(session, user, data)
+        await self.send(
+            telegram_id,
+            "✅ <b>Your rules are saved</b> (they apply within a minute):\n"
+            f"• Trades/day: <b>{data['max_trades_per_day']}</b>\n"
+            f"• Daily loss: <b>{self._daily_loss_desc(data)}</b>\n"
+            f"• Risk/trade: <b>{data['max_risk_per_trade_pct']:g}%</b>\n"
+            f"• Losses in a row: <b>{data['max_consecutive_losses']}</b>\n"
+            f"• Exposure: <b>{data['max_account_exposure_pct']:g}%</b>\n\n/status",
+        )
+
+    def _apply_setrisk_answer(self, step: str, t: str, data: dict) -> str | None:
+        """Apply one answer to `data`. Returns an error string if invalid."""
+        if step == "trades":
+            try:
+                v = int(t)
+            except ValueError:
+                return "Please reply a whole number (e.g. 2)."
+            if not (1 <= v <= 100):
+                return "Number must be between 1 and 100."
+            data["max_trades_per_day"] = v
+        elif step == "dailyloss":
+            if t in ("off", "none", "0"):
+                data["max_daily_loss_pct"] = 0
+                data["max_daily_loss_usd"] = 0
+            elif "$" in t or "usd" in t:
+                try:
+                    v = float(t.replace("$", "").replace("usd", "").strip())
+                except ValueError:
+                    return "Please reply like 50$ or 5%."
+                data["max_daily_loss_usd"] = v
+                data["max_daily_loss_pct"] = 0
+            else:
+                try:
+                    v = float(t.replace("%", "").strip())
+                except ValueError:
+                    return "Please reply like 5% or 50$ (or 'off')."
+                data["max_daily_loss_pct"] = v
+                data["max_daily_loss_usd"] = 0
+        elif step == "riskpertrade":
+            try:
+                v = float(t.replace("%", "").strip())
+            except ValueError:
+                return "Please reply a number (e.g. 2)."
+            if not (0 <= v <= 100):
+                return "Number must be between 0 and 100."
+            data["max_risk_per_trade_pct"] = v
+        elif step == "losses":
+            try:
+                v = int(t)
+            except ValueError:
+                return "Please reply a whole number (e.g. 2)."
+            if not (1 <= v <= 100):
+                return "Number must be between 1 and 100."
+            data["max_consecutive_losses"] = v
+        elif step == "exposure":
+            if t in ("off", "none"):
+                data["max_account_exposure_pct"] = 0
+            else:
+                try:
+                    v = float(t.replace("%", "").strip())
+                except ValueError:
+                    return "Please reply a number (e.g. 5) or 'off'."
+                if not (0 <= v <= 100):
+                    return "Number must be between 0 and 100."
+                data["max_account_exposure_pct"] = v
+        return None
+
+    async def _lock(self, telegram_id, username, arg) -> None:
+        async with self._sf() as session:
+            user = await repo.get_user(session, telegram_id)
+            if user is None:
+                await self.send(telegram_id, "Send /start first.")
+                return
+            # Daily lock: holds for the rest of the day and CANNOT be self-undone.
+            await repo.set_lock(session, user.id, "self-lock (Telegram)", daily=True)
+        await self.send(
+            telegram_id,
+            "🔒 You're locked for the rest of today. New trades will be closed.\n\n"
+            "This <b>cannot be undone on demand</b> — that's the point: it protects you "
+            "from emotional trading. It clears automatically at the next trading day.",
+        )
+
+    async def _unlock(self, telegram_id, username, arg) -> None:
+        """Admin-only override. Regular users intentionally cannot self-unlock."""
+        if not self._is_admin(telegram_id):
+            await self.send(
+                telegram_id,
+                "🔒 The lock can't be removed on demand — this is intentional, to "
+                "protect you from emotional trading. It clears at the next trading day.",
+            )
+            return
+        if not arg.isdigit():
+            await self.send(telegram_id, "Usage (admin): /unlock &lt;telegram_id&gt;")
+            return
+        target = int(arg)
+        async with self._sf() as session:
+            user = await repo.get_user(session, target)
+            if user is None:
+                await self.send(telegram_id, "User not found.")
+                return
+            await repo.clear_lock(session, user.id)
+        await self.send(telegram_id, f"🟢 Unlocked {target} (admin override).")
+        await self.send(target, "🟢 Your lock was removed by support.")
+
+    async def _subscribe(self, telegram_id, username, arg) -> None:
+        plan = "quarterly" if arg.strip().lower().startswith("q") else "monthly"
+
+        # Preferred: CryptoPay auto-confirmed invoice (one-tap, auto-activates).
+        if self.invoicer is not None:
+            await self.send(telegram_id, f"🧾 Creating your {plan} invoice…")
+            ok, result = await self.invoicer(telegram_id, plan)
+            if ok:
+                await self.send(
+                    telegram_id,
+                    f"<b>💳 Pay your {plan} subscription</b>\n"
+                    f"Tap to pay (crypto): {_esc(result)}\n\n"
+                    "Activates automatically once paid. "
+                    "Use /subscribe quarterly for the quarterly plan, "
+                    "or /stars to pay with Telegram Stars.",
+                )
+            else:
+                await self.send(telegram_id, result)
+            return
+
+        # Fallback: manual wallet + tx-hash flow.
+        if not settings.crypto_wallet_address:
+            await self.send(telegram_id, "Payments aren't configured yet. Please contact the admin.")
+            return
+        await self.send(
+            telegram_id,
+            "<b>💳 Subscribe (crypto)</b>\n"
+            f"Monthly: <b>{settings.price_monthly:g} {settings.crypto_currency}</b>\n"
+            f"Quarterly: <b>{settings.price_quarterly:g} {settings.crypto_currency}</b>\n\n"
+            f"Send to:\n<code>{_esc(settings.crypto_wallet_address)}</code>\n"
+            f"Network: {settings.crypto_currency}\n"
+            f"Reference (include if possible): <code>{telegram_id}</code>\n\n"
+            "After paying, send:\n<code>/paid YOUR_TX_HASH</code>",
+        )
+
+    async def _stars(self, telegram_id, username, arg) -> None:
+        """Pay with Telegram Stars (native)."""
+        if self.star_invoicer is None:
+            await self.send(telegram_id, "Stars payments aren't available right now.")
+            return
+        plan = "quarterly" if arg.strip().lower().startswith("q") else "monthly"
+        async with self._sf() as session:
+            if await repo.get_user(session, telegram_id) is None:
+                await repo.register_user(session, telegram_id, username)
+        ok, msg = await self.star_invoicer(telegram_id, plan)
+        await self.send(telegram_id, msg)
+
+    async def _paid(self, telegram_id, username, arg) -> None:
+        if not arg:
+            await self.send(telegram_id, "Usage: /paid &lt;tx_hash&gt;")
+            return
+        async with self._sf() as session:
+            user = await repo.get_user(session, telegram_id)
+            if user is None:
+                await self.send(telegram_id, "Send /start first.")
+                return
+            payment = await repo.submit_payment(
+                session, user, tx_hash=arg, amount=None,
+                currency=settings.crypto_currency, note=None,
+            )
+        await self.send(
+            telegram_id,
+            f"✅ Payment #{payment.id} submitted (tx <code>{_esc(arg[:24])}</code>). "
+            "We'll verify and activate your subscription shortly.",
+        )
+        # Notify admins.
+        for admin_id in settings.admin_ids:
+            await self.send(
+                admin_id,
+                f"💰 New payment #{payment.id} from <code>{telegram_id}</code> "
+                f"(@{_esc(username) if username else '—'})\ntx: <code>{_esc(arg)}</code>\n"
+                f"/verify {payment.id} then /activate {telegram_id} 30",
+            )
+
+    # --------------------------------------------------------------- /link FSM
+    async def _link_start(self, telegram_id, username, arg) -> None:
+        async with self._sf() as session:
+            user = await repo.register_user(session, telegram_id, username)  # ensure exists
+            if user.tos_accepted_at is None:
+                await self.send(
+                    telegram_id,
+                    "Please accept the terms first — reply /agree (or /start to read them).",
+                )
+                return
+        self.states[telegram_id] = {"flow": "link", "step": "login", "data": {}}
+        await self.send(
+            telegram_id,
+            "<b>🔗 Link your MT5 account</b>\n"
+            "Send your <b>account number (login)</b>.\n"
+            "<i>(Send /cancel anytime.)</i>",
+        )
+
+    async def _link_step(self, telegram_id, text, message_id) -> None:
+        state = self.states.get(telegram_id)
+        if not state:
+            return
+        step = state["step"]
+        data = state["data"]
+
+        if step == "login":
+            if not text.isdigit():
+                await self.send(telegram_id, "Login must be a number. Try again, or /cancel.")
+                return
+            data["login"] = int(text)
+            state["step"] = "server"
+            await self.send(telegram_id, "Now send your <b>broker server</b> (e.g. <code>OctaFX-Real</code>).")
+            return
+
+        if step == "server":
+            data["server"] = text
+            state["step"] = "password"
+            await self.send(
+                telegram_id,
+                "Now send your MT5 <b>password</b>.\n"
+                "🔐 <i>I'll delete your message immediately and store it encrypted.</i>",
+            )
+            return
+
+        if step == "password":
+            data["password"] = text
+            # Remove the password message from the chat for safety.
+            if self.delete and message_id is not None:
+                await self.delete(telegram_id, message_id)
+            # Users connect their trading account — no need to ask the type.
+            data["account_type"] = "trading"
+            self.states.pop(telegram_id, None)
+            await self._finish_link(telegram_id, data)
+            return
+
+    async def _finish_link(self, telegram_id, data: dict) -> None:
+        atype = data["account_type"]
+        async with self._sf() as session:
+            user = await repo.get_user(session, telegram_id)
+            if user.accounts:  # re-link → update the existing account
+                acct = await repo.update_account(
+                    session, user.accounts[0],
+                    login=data["login"], server=data["server"],
+                    password=data["password"], broker=None, account_type=atype,
+                )
+            else:
+                acct = await repo.add_account(
+                    session, user,
+                    login=data["login"], server=data["server"],
+                    password=data["password"], broker=None, account_type=atype,
+                )
+            account_id = acct.id
+            subscribed = repo.subscription_is_active(user.subscription)
+        await self.send(
+            telegram_id,
+            f"🔗 Saved MT5 <b>{data['login']}</b> @ {_esc(data['server'])}, encrypted.",
+        )
+
+        # Validate the credentials immediately (if a validator is wired).
+        connected = True
+        if self.validator is not None:
+            await self.send(telegram_id, "🔄 Checking your credentials…")
+            try:
+                ok, message = await self.validator(account_id)
+            except Exception:  # noqa: BLE001
+                ok, message = False, "validation error"
+            connected = ok
+            if ok:
+                await self.send(telegram_id, f"✅ Connected to <b>{_esc(message)}</b>.")
+            else:
+                await self.send(
+                    telegram_id,
+                    f"❌ Couldn't log in: {_esc(message)}\n"
+                    "Please /link again with the correct login, server, and password.",
+                )
+
+        # Subscription gate: protection only starts when subscribed.
+        if connected:
+            if subscribed:
+                await self.send(telegram_id, "🛡️ Zanzer is now protecting your account. /status")
+            else:
+                await self.send(
+                    telegram_id,
+                    "⏳ You're <b>not subscribed yet</b>, so monitoring is paused "
+                    "(you're added as pending). Activate protection with "
+                    "/subscribe or /stars.",
+                )
+
+    # ----------------------------------------------------------- admin cmds
+    async def _admin_pending(self, telegram_id, username, arg) -> None:
+        if not self._is_admin(telegram_id):
+            await self.send(telegram_id, "Not authorized.")
+            return
+        async with self._sf() as session:
+            pending = await repo.list_pending_payments(session)
+            rows = []
+            for p in pending:
+                rows.append(f"#{p.id} user={p.user_id} {p.currency or ''} tx={_esc((p.tx_hash or '')[:18])}")
+        await self.send(telegram_id, "<b>Pending payments</b>\n" + ("\n".join(rows) if rows else "(none)"))
+
+    async def _admin_verify(self, telegram_id, username, arg) -> None:
+        if not self._is_admin(telegram_id):
+            await self.send(telegram_id, "Not authorized.")
+            return
+        if not arg.isdigit():
+            await self.send(telegram_id, "Usage: /verify &lt;payment_id&gt;")
+            return
+        async with self._sf() as session:
+            payment = await repo.get_payment(session, int(arg))
+            if payment is None:
+                await self.send(telegram_id, "Payment not found.")
+                return
+            await repo.set_payment_status(session, payment, "verified")
+        await self.send(telegram_id, f"Payment #{arg} marked verified. Now /activate the user.")
+
+    async def _admin_activate(self, telegram_id, username, arg) -> None:
+        if not self._is_admin(telegram_id):
+            await self.send(telegram_id, "Not authorized.")
+            return
+        parts = arg.split()
+        if len(parts) < 2 or not parts[0].isdigit() or not parts[1].isdigit():
+            await self.send(telegram_id, "Usage: /activate &lt;telegram_id&gt; &lt;days&gt; [plan]")
+            return
+        target_tid, days = int(parts[0]), int(parts[1])
+        plan = parts[2] if len(parts) > 2 else "monthly"
+        async with self._sf() as session:
+            user = await repo.get_user(session, target_tid)
+            if user is None:
+                await self.send(telegram_id, "User not found (have they sent /start?).")
+                return
+            sub = await repo.activate_subscription(session, user, days, plan=plan,
+                                                   activated_by=telegram_id)
+            expires = str(sub.expires_at)[:10]
+        await self.send(telegram_id, f"✅ Activated {target_tid} for {days}d ({plan}), expires {expires}.")
+        await self.send(target_tid, f"🎉 Your subscription is active until {expires}. /status")
+
+    async def _admin_accounts(self, telegram_id, username, arg) -> None:
+        if not self._is_admin(telegram_id):
+            await self.send(telegram_id, "Not authorized.")
+            return
+        async with self._sf() as session:
+            accounts = await repo.list_all_accounts(session)
+            rows = []
+            for a in accounts:
+                emoji = {"active": "🟢", "pending": "🟡", "error": "🔴"}.get(a.status, "•")
+                rows.append(
+                    f"{emoji} #{a.id} {a.login}@{_esc(a.server)} "
+                    f"user={a.user.telegram_id} [{_esc(a.status)}]"
+                )
+        await self.send(
+            telegram_id,
+            "<b>MT5 accounts</b>\n" + ("\n".join(rows) if rows else "(none)") +
+            "\n\n<i>Status flips to 🟢 active when its worker connects "
+            "(start: python -m backend.run_account &lt;id&gt;).</i>",
+        )
+
+    async def _admin_provision(self, telegram_id, username, arg) -> None:
+        if not self._is_admin(telegram_id):
+            await self.send(telegram_id, "Not authorized.")
+            return
+        if not arg.isdigit():
+            await self.send(telegram_id, "Usage: /provision &lt;account_id&gt;")
+            return
+        if self.provisioner is None:
+            await self.send(
+                telegram_id,
+                "Provisioning runs on the VPS. Use: "
+                "<code>python -m backend.provisioning &lt;account_id&gt;</code> "
+                "(or set AUTO_PROVISION=true).",
+            )
+            return
+        await self.send(telegram_id, f"⏳ Provisioning terminal for account {_esc(arg)}…")
+        result = await self.provisioner(int(arg))
+        await self.send(telegram_id, f"Done: <code>{_esc(result)}</code>")
+
+    async def _admin_broadcast(self, telegram_id, username, arg) -> None:
+        """Send an announcement to every registered user."""
+        if not self._is_admin(telegram_id):
+            await self.send(telegram_id, "Not authorized.")
+            return
+        msg = arg.strip()
+        if not msg:
+            await self.send(telegram_id, "Usage: /broadcast &lt;message&gt;")
+            return
+        async with self._sf() as session:
+            users = await repo.list_users(session)
+        await self.send(telegram_id, f"📢 Broadcasting to {len(users)} user(s)…")
+        body = f"📢 <b>Announcement</b>\n\n{_esc(msg)}"
+        sent = failed = 0
+        for u in users:
+            try:
+                ok = await self.send(u.telegram_id, body)
+                sent += 1 if ok else 0
+                failed += 0 if ok else 1
+            except Exception:  # noqa: BLE001
+                failed += 1
+            await asyncio.sleep(0.05)  # stay under Telegram's ~30 msg/s limit
+        await self.send(telegram_id, f"✅ Broadcast done — sent {sent}, failed {failed}.")
+
+    async def _admin_users(self, telegram_id, username, arg) -> None:
+        if not self._is_admin(telegram_id):
+            await self.send(telegram_id, "Not authorized.")
+            return
+        async with self._sf() as session:
+            users = await repo.list_users(session)
+            rows = []
+            for u in users:
+                act = "✅" if repo.subscription_is_active(u.subscription) else "—"
+                rows.append(f"{act} {u.telegram_id} @{_esc(u.username) if u.username else '—'}")
+        await self.send(telegram_id, "<b>Users</b>\n" + ("\n".join(rows) if rows else "(none)"))
