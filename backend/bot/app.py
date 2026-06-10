@@ -31,6 +31,8 @@ async def run() -> None:
         provisioner=provision_via_subprocess,
         invoicer=create_subscription_invoice,
         star_invoicer=send_star_invoice,
+        edit=client.edit_message_text,
+        answer_cbq=client.answer_callback_query,
     )
     log.info("Bot started (admins=%s). Polling for updates...", settings.admin_ids or "none")
 
@@ -45,6 +47,23 @@ async def run() -> None:
 
         for upd in updates:
             offset = upd["update_id"] + 1
+
+            # Inline-menu button tap.
+            if "callback_query" in upd:
+                cq = upd["callback_query"]
+                frm = cq.get("from", {})
+                msg = cq.get("message") or {}
+                try:
+                    await dispatcher.handle_callback(
+                        telegram_id=frm.get("id"),
+                        username=frm.get("username"),
+                        data=cq.get("data", ""),
+                        callback_query_id=cq["id"],
+                        message_id=msg.get("message_id"),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.error("callback handling failed: %s", exc)
+                continue
 
             # Telegram Stars: must approve the pre-checkout within 10s.
             if "pre_checkout_query" in upd:

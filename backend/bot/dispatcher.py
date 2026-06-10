@@ -40,44 +40,70 @@ DISCLAIMER = (
     "decisions. Risk management always overrides everything. This is not financial advice.</i>"
 )
 
-HELP = (
-    "<b>🛡️ Zanzer — Menu</b>\n\n"
-    "<b>📊 Performance</b>\n"
-    "/status — account, risk &amp; emotion score\n"
-    "/today — today's trades &amp; P&amp;L\n"
-    "/yesterday — yesterday's recap\n"
-    "/weekly — weekly report (or /weekly 30)\n"
-    "/monthly — equity, drawdown &amp; emotion charts\n"
-    "/performance — all-time stats\n\n"
-    "<b>📓 Journal &amp; Coaching</b>\n"
-    "/journal — view / fill trade journals\n"
-    "/trades — recent trade history\n"
-    "/coach — AI psychology review 🤖\n\n"
-    "<b>🛡️ Risk &amp; Account</b>\n"
-    "/risk — view your risk rules\n"
-    "/setrisk — change your rules (guided)\n"
-    "/lock — lock yourself for today\n"
-    "/explain — record why (when locked)\n"
-    "/link — connect your MT5 account\n\n"
-    "<b>💳 Subscription</b>\n"
-    "/subscribe — pay with crypto (auto)\n"
-    "/stars — pay with Telegram Stars ⭐\n"
-    "/paid &lt;tx&gt; — submit a manual payment\n\n"
-    "<i>Tip: a lock can't be removed on demand — it protects you from emotional "
-    "trading and clears the next trading day.</i>"
-)
+# --- Inline menu: short home + tappable sections (set via callback buttons) ---
 
-ADMIN_HELP = (
-    "\n\n<b>🔧 Admin</b>\n"
-    "/pending — pending payments\n"
-    "/verify &lt;id&gt; — verify a payment\n"
-    "/activate &lt;tid&gt; &lt;days&gt; [plan] — activate a user\n"
-    "/users — list users\n"
-    "/accounts — list MT5 accounts\n"
-    "/provision &lt;id&gt; — provision a terminal\n"
-    "/unlock &lt;tid&gt; — remove a user's lock\n"
-    "/broadcast &lt;msg&gt; — announce to all users"
-)
+def _ik(rows: list[list[tuple[str, str]]]) -> dict:
+    """Build a Telegram inline keyboard from rows of (label, callback_data)."""
+    return {"inline_keyboard": [[{"text": t, "callback_data": d} for (t, d) in row] for row in rows]}
+
+
+def _home_keyboard(is_admin: bool) -> dict:
+    rows = [
+        [("📊 Performance", "m:perf"), ("📓 Journal & Coach", "m:journal")],
+        [("⚙️ Settings", "m:settings"), ("💳 Subscription", "m:sub")],
+    ]
+    if is_admin:
+        rows.append([("🔧 Admin", "m:admin")])
+    return _ik(rows)
+
+
+_BACK_KB = _ik([[("⬅️ Back to menu", "m:home")]])
+
+# Section bodies — commands stay tappable in Telegram.
+_SECTION_TEXT = {
+    "perf": (
+        "📊 <b>Performance</b>\n"
+        "/status — account, risk &amp; emotion score\n"
+        "/today — today's trades &amp; P&amp;L\n"
+        "/yesterday — yesterday's recap\n"
+        "/weekly — weekly report (/weekly 30 for 30 days)\n"
+        "/monthly — equity, drawdown &amp; emotion charts\n"
+        "/performance — all-time stats"
+    ),
+    "journal": (
+        "📓 <b>Journal &amp; Coaching</b>\n"
+        "/journal — view / fill trade journals\n"
+        "/trades — recent trade history\n"
+        "/coach — AI psychology review 🤖"
+    ),
+    "settings": (
+        "⚙️ <b>Settings</b>\n"
+        "/risk — view your risk rules\n"
+        "/setrisk — change your rules (guided)\n"
+        "/link — connect / relink your MT5 account\n"
+        "/lock — lock yourself for today\n"
+        "/explain — record why (when locked)\n\n"
+        "<i>A lock can't be removed on demand — it protects you from emotional "
+        "trading and clears the next trading day.</i>"
+    ),
+    "sub": (
+        "💳 <b>Subscription</b>\n"
+        "/subscribe — pay with crypto (auto)\n"
+        "/stars — pay with Telegram Stars ⭐\n"
+        "/paid &lt;tx&gt; — submit a manual payment"
+    ),
+    "admin": (
+        "🔧 <b>Admin</b>\n"
+        "/pending — pending payments\n"
+        "/verify &lt;id&gt; — verify a payment\n"
+        "/activate &lt;tid&gt; &lt;days&gt; [plan] — activate a user\n"
+        "/users — list users\n"
+        "/accounts — list MT5 accounts\n"
+        "/provision &lt;id&gt; — provision a terminal\n"
+        "/unlock &lt;tid&gt; — remove a user's lock\n"
+        "/broadcast &lt;msg&gt; — announce to all users"
+    ),
+}
 
 
 def _esc(v) -> str:
@@ -119,13 +145,16 @@ def _ago(ts: datetime) -> str:
 
 class BotDispatcher:
     def __init__(self, send, delete=None, validator=None, provisioner=None,
-                 invoicer=None, star_invoicer=None, session_factory=SessionLocal) -> None:
-        # Wrap send so every outgoing message ends with a /menu footer.
+                 invoicer=None, star_invoicer=None, edit=None, answer_cbq=None,
+                 session_factory=SessionLocal) -> None:
+        # Wrap send so plain messages end with a /menu footer. Messages that
+        # carry an inline keyboard (the menu itself) skip the footer.
         _raw_send = send
-        async def _send_with_help(chat_id, text):
-            footer = "\n\n/menu"
+        async def _send_with_help(chat_id, text, reply_markup=None):
+            if reply_markup is not None:
+                return await _raw_send(chat_id, text, reply_markup=reply_markup)
             if not str(text).rstrip().endswith("/menu"):
-                text = str(text) + footer
+                text = str(text) + "\n\n/menu"
             return await _raw_send(chat_id, text)
         self.send = _send_with_help
         self.delete = delete        # async (chat_id, message_id) -> bool | None
@@ -133,6 +162,8 @@ class BotDispatcher:
         self.provisioner = provisioner  # async (account_id) -> str
         self.invoicer = invoicer    # async (telegram_id, plan) -> (ok: bool, url_or_msg)
         self.star_invoicer = star_invoicer  # async (telegram_id, plan) -> (ok, msg)
+        self.edit = edit            # async (chat_id, message_id, text, reply_markup=)
+        self.answer_cbq = answer_cbq  # async (callback_query_id) -> bool
         self._sf = session_factory
         self.states: dict[int, dict] = {}
 
@@ -242,9 +273,53 @@ class BotDispatcher:
             "/menu for all commands.",
         )
 
+    async def _home_text(self, telegram_id: int) -> str:
+        """Short, contextual main-menu text reflecting subscription + link state."""
+        async with self._sf() as session:
+            user = await repo.get_user(session, telegram_id)
+            if user is None:
+                return "🛡️ <b>Zanzer</b>\nSend /start to begin."
+            active = repo.subscription_is_active(user.subscription)
+            linked = bool(user.accounts)
+            login = user.accounts[0].login if linked else None
+        lines = ["🛡️ <b>Zanzer — Menu</b>", ""]
+        lines.append(f"Subscription: <b>{'🟢 active' if active else '🔴 inactive'}</b>")
+        lines.append(f"MT5: <b>{f'🟢 linked ({login})' if linked else '⚪ not linked'}</b>")
+        if not linked:
+            lines.append("\n👉 Start in <b>⚙️ Settings → /link</b> to connect your account.")
+        elif not active:
+            lines.append("\n👉 Tap <b>💳 Subscription</b> to activate protection.")
+        lines.append("\nTap a section below 👇")
+        return "\n".join(lines)
+
     async def _menu(self, telegram_id, username, arg) -> None:
-        text = HELP + (ADMIN_HELP if self._is_admin(telegram_id) else "")
-        await self.send(telegram_id, text)
+        text = await self._home_text(telegram_id)
+        await self.send(telegram_id, text, reply_markup=_home_keyboard(self._is_admin(telegram_id)))
+
+    async def handle_callback(self, *, telegram_id: int, username: str | None,
+                              data: str, callback_query_id: str,
+                              message_id: int | None = None) -> None:
+        """Handle inline-menu button taps (callback queries)."""
+        if self.answer_cbq:
+            try:
+                await self.answer_cbq(callback_query_id)
+            except Exception:  # noqa: BLE001
+                pass
+        key = data.split(":", 1)[1] if ":" in data else "home"
+        if key == "home":
+            text = await self._home_text(telegram_id)
+            kb = _home_keyboard(self._is_admin(telegram_id))
+        elif key == "admin" and not self._is_admin(telegram_id):
+            text, kb = "Not authorized.", _BACK_KB
+        elif key in _SECTION_TEXT:
+            text, kb = _SECTION_TEXT[key], _BACK_KB
+        else:
+            text = await self._home_text(telegram_id)
+            kb = _home_keyboard(self._is_admin(telegram_id))
+        if self.edit and message_id is not None:
+            if await self.edit(telegram_id, message_id, text, reply_markup=kb):
+                return
+        await self.send(telegram_id, text, reply_markup=kb)
 
     async def _status(self, telegram_id, username, arg) -> None:
         async with self._sf() as session:

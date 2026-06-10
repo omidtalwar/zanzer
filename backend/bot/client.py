@@ -32,21 +32,57 @@ async def get_updates(offset: int | None, timeout: int = 25) -> list[dict]:
     return data["result"]
 
 
-async def send_message(chat_id: int | str, text: str, parse_mode: str = "HTML") -> bool:
+async def send_message(chat_id: int | str, text: str, parse_mode: str = "HTML",
+                       reply_markup: dict | None = None) -> bool:
+    body = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": parse_mode,
+        "disable_web_page_preview": True,
+    }
+    if reply_markup is not None:
+        body["reply_markup"] = reply_markup
     async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(
-            f"{_base()}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": text,
-                "parse_mode": parse_mode,
-                "disable_web_page_preview": True,
-            },
-        )
+        resp = await client.post(f"{_base()}/sendMessage", json=body)
     if resp.status_code != 200:
         log.error("sendMessage failed [%s]: %s", resp.status_code, resp.text)
         return False
     return True
+
+
+async def edit_message_text(chat_id: int | str, message_id: int, text: str,
+                            parse_mode: str = "HTML", reply_markup: dict | None = None) -> bool:
+    """Edit an existing message in place (used for inline-menu navigation)."""
+    body = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": parse_mode,
+        "disable_web_page_preview": True,
+    }
+    if reply_markup is not None:
+        body["reply_markup"] = reply_markup
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(f"{_base()}/editMessageText", json=body)
+        # 400 "message is not modified" is harmless (same content tapped twice).
+        return resp.status_code == 200
+    except httpx.HTTPError as exc:
+        log.error("editMessageText error: %s", exc)
+        return False
+
+
+async def answer_callback_query(callback_query_id: str, text: str | None = None) -> bool:
+    """Acknowledge a button tap so Telegram stops the loading spinner."""
+    body = {"callback_query_id": callback_query_id}
+    if text:
+        body["text"] = text
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(f"{_base()}/answerCallbackQuery", json=body)
+        return resp.status_code == 200
+    except httpx.HTTPError:
+        return False
 
 
 async def send_photo(chat_id: int | str, photo: bytes, caption: str | None = None,

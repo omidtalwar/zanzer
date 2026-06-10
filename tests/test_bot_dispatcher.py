@@ -28,8 +28,9 @@ async def _session_factory():
 def _make_dispatcher(Session):
     sent: list[tuple[int, str]] = []
     deleted: list[tuple[int, int]] = []
+    edits: list[tuple[int, int, str]] = []
 
-    async def send(chat_id, text):
+    async def send(chat_id, text, reply_markup=None):
         sent.append((chat_id, text))
         return True
 
@@ -37,7 +38,16 @@ def _make_dispatcher(Session):
         deleted.append((chat_id, message_id))
         return True
 
-    d = BotDispatcher(send=send, delete=delete, session_factory=Session)
+    async def edit(chat_id, message_id, text, reply_markup=None):
+        edits.append((chat_id, message_id, text))
+        return True
+
+    async def answer_cbq(cbq_id, text=None):
+        return True
+
+    d = BotDispatcher(send=send, delete=delete, edit=edit, answer_cbq=answer_cbq,
+                      session_factory=Session)
+    d._edits = edits  # expose for assertions
     return d, sent, deleted
 
 
@@ -67,10 +77,28 @@ async def test_link_requires_tos_then_agree_unlocks():
 async def test_help_and_unknown():
     Session = await _session_factory()
     d, sent, _ = _make_dispatcher(Session)
+    await d.handle(telegram_id=1, username=None, text="/start")
     await d.handle(telegram_id=1, username=None, text="/menu")
     await d.handle(telegram_id=1, username=None, text="/wat")
-    assert any("Menu" in t and "Performance" in t for _, t in sent)
+    # Home menu is short and contextual (no long flat command dump).
+    assert any("Zanzer — Menu" in t for _, t in sent)
     assert any("Unknown command" in t for _, t in sent)
+
+
+async def test_menu_callback_navigation():
+    """Tapping a section button edits the message to that section's commands."""
+    Session = await _session_factory()
+    d, sent, _ = _make_dispatcher(Session)
+    await d.handle(telegram_id=1, username=None, text="/start")
+    await d.handle(telegram_id=1, username=None, text="/menu")
+    # Tap "Settings"
+    await d.handle_callback(telegram_id=1, username=None, data="m:settings",
+                            callback_query_id="cbq1", message_id=10)
+    assert any("Settings" in t and "/setrisk" in t for *_, t in d._edits)
+    # Tap "Back"
+    await d.handle_callback(telegram_id=1, username=None, data="m:home",
+                            callback_query_id="cbq2", message_id=10)
+    assert any("Zanzer — Menu" in t for *_, t in d._edits)
 
 
 async def test_link_flow_saves_encrypted_account_and_deletes_password():
