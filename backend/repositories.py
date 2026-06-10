@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -803,6 +803,16 @@ async def community_stats(session: AsyncSession) -> dict:
     journaled = sum(1 for t in trades if t.entry_journal_id is not None)
     journaled_pct = round(journaled / trades_today * 100) if trades_today else 0
 
+    # All-time trades guarded (a growing vanity metric for the channel).
+    total_trades = (await session.execute(
+        select(func.count()).select_from(Trade)
+    )).scalar() or 0
+    # All-time journaling consistency across every recorded trade.
+    total_journaled = (await session.execute(
+        select(func.count()).select_from(Trade).where(Trade.entry_journal_id.is_not(None))
+    )).scalar() or 0
+    consistency_pct = round(total_journaled / total_trades * 100) if total_trades else 0
+
     lock_events = (await session.execute(
         select(RiskEvent).where(
             RiskEvent.created_at >= today_start,
@@ -830,6 +840,8 @@ async def community_stats(session: AsyncSession) -> dict:
         "protected": protected,
         "trades_today": trades_today,
         "journaled_pct": journaled_pct,
+        "total_trades": total_trades,
+        "consistency_pct": consistency_pct,
         "accounts_locked": accounts_locked,
         "revenge_blocked": revenge_blocked,
         "avg_score": avg_score,

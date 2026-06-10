@@ -24,29 +24,65 @@ log = get_logger("channel")
 _LAST_POST_KEY = "channel_last_post_date"
 
 
+_DIV = "━━━━━━━━━━━━━━━━━━"
+
+# Rotating one-a-day trading-psychology nuggets (on-brand: discipline, not signals).
+TRADING_WISDOM = [
+    "The market pays the patient. Overtrading is just impatience — with a fee. 💸",
+    "Your stop loss is a seatbelt, not a suggestion. Buckle up before every trade. 🚗",
+    "Risk 1% and you survive 100 mistakes. Risk 10% and you survive 10. Math doesn't care about conviction. 🧮",
+    "Revenge trading is the market charging interest on your emotions. Walk away. 🔁",
+    "A scratch at breakeven is a WIN for your discipline. Not every trade must print. ✂️",
+    "The best traders aren't right more often — they just lose smaller. 📉",
+    "FOMO is expensive. There is ALWAYS another setup. ⏳",
+    "Green months are built by avoiding red disasters, not chasing home runs. 🛡️",
+    "Position size kills accounts, not direction. Size like you'll be wrong. ⚖️",
+    "Boredom is a position. Sitting on your hands is a skill most never learn. 🧘",
+    "You don't rise to your goals — you fall to your rules. Set them when calm. 🎯",
+    "Two losses in a row? That's data, not a dare. Step back. 🧊",
+    "The hardest trade to take is no trade. Take it anyway. 🚫",
+    "Protect capital first. Profits are what's left after you survive. 🏦",
+    "Discipline is choosing what you want most over what you want now. 🔒",
+]
+
+
+def _wisdom_for_today() -> str:
+    doy = datetime.now(tz=timezone.utc).timetuple().tm_yday
+    return TRADING_WISDOM[doy % len(TRADING_WISDOM)]
+
+
 def format_post(stats: dict) -> str:
     """Build the anonymized community post from aggregate stats."""
     lines = [
-        "🛡️ <b>Zanzer — Daily Discipline Report</b>",
-        f"<i>{stats['date']}</i>",
-        "",
-        f"👥 Traders protected today: <b>{stats['protected']}</b>",
-        f"📊 Trades monitored: <b>{stats['trades_today']}</b>",
+        "🛡️ <b>ZanZer Risk Lab — Daily Report</b>",
+        f"📅 <i>{stats['date']}</i>",
+        _DIV,
+        f"👥 Traders protected: <b>{stats['protected']}</b>",
+        f"📊 Trades today: <b>{stats['trades_today']}</b>  ·  "
+        f"All-time guarded: <b>{stats.get('total_trades', 0):,}</b>",
+        f"🎯 Journaling consistency: <b>{stats.get('consistency_pct', 0)}%</b>",
     ]
-    if stats["trades_today"]:
-        lines.append(f"📓 Trades journaled: <b>{stats['journaled_pct']}%</b>")
-    if stats["accounts_locked"]:
-        lines.append(f"🔒 Accounts locked before bigger losses: <b>{stats['accounts_locked']}</b>")
-    if stats["revenge_blocked"]:
-        lines.append(f"🚫 Revenge trades flagged: <b>{stats['revenge_blocked']}</b>")
     if stats["avg_score"] is not None:
         lines.append(f"🧠 Community discipline score: <b>{stats['avg_score']}/100</b>")
+
+    # "Guardian in action" — only show lines that actually happened.
+    actions = []
+    if stats["accounts_locked"]:
+        actions.append(f"🔒 {stats['accounts_locked']} account(s) locked before bigger losses")
+    if stats["revenge_blocked"]:
+        actions.append(f"🚫 {stats['revenge_blocked']} revenge trade(s) stopped")
+    if actions:
+        lines.append("")
+        lines.append("<b>🛡️ Guardian in action today</b>")
+        lines += actions
+
     lines += [
-        "",
-        "Discipline beats prediction. Zanzer guards your capital so you don't "
-        "have to fight yourself. 🤝",
-        "",
-        "👉 Start protecting your account: @Zanzerbot",
+        _DIV,
+        "💡 <b>Trading Wisdom</b>",
+        f"<i>{_wisdom_for_today()}</i>",
+        _DIV,
+        "Discipline beats prediction. 🤝",
+        "👉 Protect your account: @Zanzerbot",
     ]
     return "\n".join(lines)
 
