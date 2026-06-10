@@ -69,7 +69,7 @@ async def test_help_and_unknown():
     d, sent, _ = _make_dispatcher(Session)
     await d.handle(telegram_id=1, username=None, text="/menu")
     await d.handle(telegram_id=1, username=None, text="/wat")
-    assert any("Commands" in t for _, t in sent)
+    assert any("Menu" in t and "Performance" in t for _, t in sent)
     assert any("Unknown command" in t for _, t in sent)
 
 

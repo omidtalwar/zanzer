@@ -41,28 +41,42 @@ DISCLAIMER = (
 )
 
 HELP = (
-    "<b>Commands</b>\n"
-    "/status — your account, subscription, risk &amp; emotion score\n"
-    "/today — today's trades, P&amp;L &amp; emotion score\n"
-    "/yesterday — yesterday's trade performance &amp; sessions\n"
-    "/weekly [7|30] — weekly performance report\n"
-    "/monthly — equity curve, drawdown &amp; emotion charts 📈\n"
-    "/performance — all-time stats\n"
-    "/coach — AI performance &amp; psychology review 🤖\n"
-    "/trades — your recent trade history\n"
-    "/journal — view unjournaled trades &amp; recent journals\n"
-    "/journal &lt;id&gt; — fill in the journal for a specific trade\n"
-    "/explain — record why you broke discipline (when locked by score)\n"
-    "/link — connect your MT5 account\n"
+    "<b>🛡️ Zanzer — Menu</b>\n\n"
+    "<b>📊 Performance</b>\n"
+    "/status — account, risk &amp; emotion score\n"
+    "/today — today's trades &amp; P&amp;L\n"
+    "/yesterday — yesterday's recap\n"
+    "/weekly — weekly report (or /weekly 30)\n"
+    "/monthly — equity, drawdown &amp; emotion charts\n"
+    "/performance — all-time stats\n\n"
+    "<b>📓 Journal &amp; Coaching</b>\n"
+    "/journal — view / fill trade journals\n"
+    "/trades — recent trade history\n"
+    "/coach — AI psychology review 🤖\n\n"
+    "<b>🛡️ Risk &amp; Account</b>\n"
     "/risk — view your risk rules\n"
-    "/setrisk — set your rules (I guide you step by step)\n"
-    "/lock — lock yourself for the rest of today\n"
+    "/setrisk — change your rules (guided)\n"
+    "/lock — lock yourself for today\n"
+    "/explain — record why (when locked)\n"
+    "/link — connect your MT5 account\n\n"
+    "<b>💳 Subscription</b>\n"
     "/subscribe — pay with crypto (auto)\n"
     "/stars — pay with Telegram Stars ⭐\n"
-    "/paid &lt;tx_hash&gt; — submit a manual payment\n"
-    "/menu — show this menu\n\n"
-    "<i>Note: a lock can't be removed on demand — that's by design, to protect "
-    "you from emotional trading. It clears automatically at the next trading day.</i>"
+    "/paid &lt;tx&gt; — submit a manual payment\n\n"
+    "<i>Tip: a lock can't be removed on demand — it protects you from emotional "
+    "trading and clears the next trading day.</i>"
+)
+
+ADMIN_HELP = (
+    "\n\n<b>🔧 Admin</b>\n"
+    "/pending — pending payments\n"
+    "/verify &lt;id&gt; — verify a payment\n"
+    "/activate &lt;tid&gt; &lt;days&gt; [plan] — activate a user\n"
+    "/users — list users\n"
+    "/accounts — list MT5 accounts\n"
+    "/provision &lt;id&gt; — provision a terminal\n"
+    "/unlock &lt;tid&gt; — remove a user's lock\n"
+    "/broadcast &lt;msg&gt; — announce to all users"
 )
 
 
@@ -229,7 +243,8 @@ class BotDispatcher:
         )
 
     async def _menu(self, telegram_id, username, arg) -> None:
-        await self.send(telegram_id, HELP)
+        text = HELP + (ADMIN_HELP if self._is_admin(telegram_id) else "")
+        await self.send(telegram_id, text)
 
     async def _status(self, telegram_id, username, arg) -> None:
         async with self._sf() as session:
