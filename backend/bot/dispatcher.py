@@ -89,7 +89,14 @@ def _ago(ts: datetime) -> str:
 class BotDispatcher:
     def __init__(self, send, delete=None, validator=None, provisioner=None,
                  invoicer=None, star_invoicer=None, session_factory=SessionLocal) -> None:
-        self.send = send            # async (chat_id, text) -> bool
+        # Wrap send so every outgoing message ends with a /help footer.
+        _raw_send = send
+        async def _send_with_help(chat_id, text):
+            footer = "\n\n/help"
+            if not str(text).rstrip().endswith("/help"):
+                text = str(text) + footer
+            return await _raw_send(chat_id, text)
+        self.send = _send_with_help
         self.delete = delete        # async (chat_id, message_id) -> bool | None
         self.validator = validator  # async (account_id) -> (ok: bool, message: str)
         self.provisioner = provisioner  # async (account_id) -> str
