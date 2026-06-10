@@ -15,6 +15,7 @@ from sqlalchemy.orm import selectinload
 from backend.config import settings
 from backend.db.models import (
     AccountSnapshot,
+    AppSetting,
     EmotionScore,
     Lock,
     MT5Account,
@@ -26,7 +27,7 @@ from backend.db.models import (
     TradeJournal,
     User,
 )
-from backend.security import encrypt
+from backend.security import decrypt, encrypt
 
 
 def _utcnow() -> datetime:
@@ -714,3 +715,95 @@ async def save_lock_explanation(
     if lock:
         lock.explanation = explanation
         await session.commit()
+
+
+# ---------------------------------------------------------------------------
+# App settings (admin-editable, runtime). Used for the AI coach config.
+# ---------------------------------------------------------------------------
+
+# Keys that hold secrets and must be encrypted at rest.
+_SECRET_SETTING_KEYS = {"openai_api_key", "anthropic_api_key"}
+
+
+async def get_app_setting(session: AsyncSession, key: str) -> str | None:
+    result = await session.execute(select(AppSetting).where(AppSetting.key == key))
+    row = result.scalar_one_or_none()
+    if row is None or row.value is None:
+        return None
+    if key in _SECRET_SETTING_KEYS:
+        try:
+            return decrypt(row.value)
+        except Exception:  # noqa: BLE001 - corrupt/again-encrypted value
+            return None
+    return row.value
+
+
+async def set_app_setting(session: AsyncSession, key: str, value: str | None) -> None:
+    result = await session.execute(select(AppSetting).where(AppSetting.key == key))
+    row = result.scalar_one_or_none()
+    stored = value
+    if value is not None and key in _SECRET_SETTING_KEYS:
+        stored = encrypt(value)
+    if row is None:
+        row = AppSetting(key=key, value=stored)
+        session.add(row)
+    else:
+        row.value = stored
+        row.updated_at = _utcnow()
+    await session.commit()
+
+
+async def get_ai_config(session: AsyncSession) -> dict:
+    """Effective AI coach config: DB overrides on top of env defaults.
+
+    Secret keys are returned in plaintext (decrypted) for use by the caller;
+    never expose this dict directly over the API — use mask_ai_config for that.
+    """
+    async def _val(key: str, default):
+        v = await get_app_setting(session, key)
+        return v if v not in (None, "") else default
+
+    enabled_raw = await _val("ai_coach_enabled", str(settings.ai_coach_enabled).lower())
+    provider = await _val("ai_provider", settings.ai_provider)
+    openai_key = await _val("openai_api_key", settings.openai_api_key)
+    anthropic_key = await _val("anthropic_api_key", settings.anthropic_api_key)
+    openai_model = await _val("openai_model", settings.openai_model)
+    anthropic_model = await _val("anthropic_model", settings.anthropic_model)
+
+    provider = (provider or "openai").strip().lower()
+    enabled = str(enabled_raw).strip().lower() in ("1", "true", "yes", "on")
+    if provider == "claude":
+        active_key, active_model = anthropic_key, anthropic_model
+    else:
+        active_key, active_model = openai_key, openai_model
+
+    return {
+        "enabled": enabled,
+        "provider": provider,
+        "openai_api_key": openai_key,
+        "anthropic_api_key": anthropic_key,
+        "openai_model": openai_model,
+        "anthropic_model": anthropic_model,
+        "active_key": active_key,
+        "active_model": active_model,
+        "available": bool(enabled and active_key),
+    }
+
+
+def mask_ai_config(cfg: dict) -> dict:
+    """Safe-for-API view: never returns raw API keys, only whether each is set."""
+    def _mask(v: str | None) -> str:
+        if not v:
+            return ""
+        return f"…{v[-4:]}" if len(v) >= 4 else "set"
+    return {
+        "enabled": cfg["enabled"],
+        "provider": cfg["provider"],
+        "openai_model": cfg["openai_model"],
+        "anthropic_model": cfg["anthropic_model"],
+        "openai_key_set": bool(cfg["openai_api_key"]),
+        "anthropic_key_set": bool(cfg["anthropic_api_key"]),
+        "openai_key_hint": _mask(cfg["openai_api_key"]),
+        "anthropic_key_hint": _mask(cfg["anthropic_api_key"]),
+        "available": cfg["available"],
+    }

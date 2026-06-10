@@ -212,6 +212,21 @@ class Trade(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
+class AppSetting(Base):
+    """Key-value store for runtime-editable settings (admin dashboard).
+
+    Used for AI coach config (provider, model, encrypted API keys, enabled)
+    so an admin can change them live without redeploying. Secret values are
+    Fernet-encrypted before storage (see repositories.set_app_setting).
+    """
+    __tablename__ = "app_settings"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
 class EmotionScore(Base):
     """Daily emotion/discipline score per user. One row per user per date.
 

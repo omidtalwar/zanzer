@@ -13,7 +13,6 @@ Disabled gracefully when no OpenAI key is configured (settings.ai_coach_availabl
 """
 from __future__ import annotations
 
-from backend.config import settings
 from backend.logging_config import get_logger
 from backend.services.analytics_service import PerformanceMetrics, fmt_pf, fmt_rr
 
@@ -108,38 +107,64 @@ def build_review_context(
     return "\n".join(lines)
 
 
-async def generate_review(context: str) -> str:
-    """Call OpenAI to produce the coaching review. Returns text or an error msg."""
-    if not settings.ai_coach_available:
-        return (
-            "⚠️ The AI coach isn't configured yet. An admin needs to set "
-            "OPENAI_API_KEY to enable /coach."
-        )
-    try:
-        from openai import AsyncOpenAI
+_USER_PREFIX = (
+    "Here is my trading data for the period. Coach me on my discipline and "
+    "psychology — what I did well, my repeated mistakes, and how to improve. "
+    "Do NOT tell me what to trade.\n\n"
+)
 
-        client = AsyncOpenAI(api_key=settings.openai_api_key)
-        resp = await client.chat.completions.create(
-            model=settings.openai_model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": (
-                        "Here is my trading data for the period. Coach me on my "
-                        "discipline and psychology — what I did well, my repeated "
-                        "mistakes, and how to improve. Do NOT tell me what to trade.\n\n"
-                        + context
-                    ),
-                },
-            ],
-            temperature=0.6,
-            max_tokens=600,
+
+async def generate_review(context: str, ai_config: dict) -> str:
+    """Produce the coaching review using the admin-configured provider.
+
+    `ai_config` is the dict from repositories.get_ai_config (provider,
+    active_key, active_model, available). Returns text or a friendly error.
+    """
+    if not ai_config.get("available"):
+        return (
+            "⚠️ The AI coach isn't configured yet. An admin can enable it from "
+            "the dashboard (set a provider + API key)."
         )
-        return resp.choices[0].message.content.strip()
+    provider = ai_config.get("provider", "openai")
+    try:
+        if provider == "claude":
+            return await _generate_claude(context, ai_config)
+        return await _generate_openai(context, ai_config)
     except Exception as exc:  # noqa: BLE001
-        log.error("OpenAI coach call failed: %s", exc)
+        log.error("%s coach call failed: %s", provider, exc)
         return (
             "⚠️ I couldn't reach the AI coach right now. Please try again later.\n"
             f"<i>({type(exc).__name__})</i>"
         )
+
+
+async def _generate_openai(context: str, ai_config: dict) -> str:
+    from openai import AsyncOpenAI
+
+    client = AsyncOpenAI(api_key=ai_config["active_key"])
+    resp = await client.chat.completions.create(
+        model=ai_config["active_model"],
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": _USER_PREFIX + context},
+        ],
+        temperature=0.6,
+        max_tokens=600,
+    )
+    return resp.choices[0].message.content.strip()
+
+
+async def _generate_claude(context: str, ai_config: dict) -> str:
+    from anthropic import AsyncAnthropic
+
+    client = AsyncAnthropic(api_key=ai_config["active_key"])
+    resp = await client.messages.create(
+        model=ai_config["active_model"],
+        max_tokens=600,
+        temperature=0.6,
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": _USER_PREFIX + context}],
+    )
+    # Concatenate any text blocks in the response.
+    parts = [b.text for b in resp.content if getattr(b, "type", None) == "text"]
+    return "".join(parts).strip()

@@ -9,6 +9,7 @@ import asyncio
 from html import escape
 
 from fastapi import APIRouter, Depends, Header, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend import repositories as repo
@@ -17,6 +18,7 @@ from backend.config import settings
 from backend.db.session import get_session
 from backend.schemas import BroadcastRequest, PaymentOut, SubscriptionOut, UserOut
 from backend.api.user_routes import _to_user_out
+from backend.services import hermes_service
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -108,6 +110,59 @@ async def summary(session: AsyncSession = Depends(get_session)):
         "pending_payments": len(pending),
         "accounts": len(accounts),
     }
+
+
+class AISettingsUpdate(BaseModel):
+    enabled: bool | None = None
+    provider: str | None = None          # "openai" | "claude"
+    openai_model: str | None = None
+    anthropic_model: str | None = None
+    openai_api_key: str | None = None    # write-only; blank = leave unchanged
+    anthropic_api_key: str | None = None
+
+
+@router.get("/ai-settings", dependencies=[Depends(require_admin)])
+async def get_ai_settings(session: AsyncSession = Depends(get_session)):
+    """Return the effective AI coach config with API keys masked."""
+    cfg = await repo.get_ai_config(session)
+    return repo.mask_ai_config(cfg)
+
+
+@router.post("/ai-settings", dependencies=[Depends(require_admin)])
+async def update_ai_settings(body: AISettingsUpdate,
+                             session: AsyncSession = Depends(get_session)):
+    if body.provider is not None:
+        prov = body.provider.strip().lower()
+        if prov not in ("openai", "claude"):
+            raise HTTPException(status_code=400, detail="provider must be 'openai' or 'claude'")
+        await repo.set_app_setting(session, "ai_provider", prov)
+    if body.enabled is not None:
+        await repo.set_app_setting(session, "ai_coach_enabled", "true" if body.enabled else "false")
+    if body.openai_model:
+        await repo.set_app_setting(session, "openai_model", body.openai_model.strip())
+    if body.anthropic_model:
+        await repo.set_app_setting(session, "anthropic_model", body.anthropic_model.strip())
+    # API keys: only overwrite when a non-empty value is supplied.
+    if body.openai_api_key:
+        await repo.set_app_setting(session, "openai_api_key", body.openai_api_key.strip())
+    if body.anthropic_api_key:
+        await repo.set_app_setting(session, "anthropic_api_key", body.anthropic_api_key.strip())
+    cfg = await repo.get_ai_config(session)
+    return repo.mask_ai_config(cfg)
+
+
+@router.post("/ai-settings/test", dependencies=[Depends(require_admin)])
+async def test_ai_settings(session: AsyncSession = Depends(get_session)):
+    """Run a tiny live call against the configured provider to verify it works."""
+    cfg = await repo.get_ai_config(session)
+    if not cfg["available"]:
+        raise HTTPException(status_code=400, detail="AI coach not configured (enable + set a key)")
+    text = await hermes_service.generate_review(
+        "PERIOD: connectivity test\nReply with one short sentence confirming you are working.",
+        cfg,
+    )
+    ok = not text.startswith("⚠️")
+    return {"ok": ok, "provider": cfg["provider"], "model": cfg["active_model"], "sample": text[:200]}
 
 
 @router.get("/users", response_model=list[UserOut], dependencies=[Depends(require_admin)])

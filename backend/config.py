@@ -97,17 +97,18 @@ class Settings(BaseSettings):
     expiry_reminder_days: int = 3
 
     # --- AI Performance Coach (Hermes) ---
-    # OpenAI API key. Leave blank to disable /coach (graceful fallback).
+    # These are DEFAULTS only. The effective config is admin-editable at runtime
+    # via the dashboard (stored in the app_settings table); see
+    # repositories.get_ai_config which merges DB overrides over these env values.
+    ai_provider: str = "openai"          # "openai" | "claude"
     openai_api_key: str | None = None
     openai_model: str = "gpt-4o-mini"
+    anthropic_api_key: str | None = None
+    anthropic_model: str = "claude-sonnet-4-6"
     ai_coach_enabled: bool = True
 
     # --- App ---
     app_env: str = "development"
-
-    @property
-    def ai_coach_available(self) -> bool:
-        return bool(self.ai_coach_enabled and self.openai_api_key)
 
     @property
     def telegram_enabled(self) -> bool:

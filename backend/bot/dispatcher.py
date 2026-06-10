@@ -571,15 +571,6 @@ class BotDispatcher:
     # ----------------------------------------------------------------- /coach
     async def _coach(self, telegram_id, username, arg) -> None:
         """AI performance & psychology review of the last N days (default 7)."""
-        if not settings.ai_coach_available:
-            await self.send(
-                telegram_id,
-                "🤖 <b>AI Coach</b>\n\n"
-                "The AI coach isn't enabled yet. An admin needs to set "
-                "<code>OPENAI_API_KEY</code> to turn it on.",
-            )
-            return
-
         days = 30 if arg.strip() in ("30", "month") else 7
         from datetime import timedelta
         until = datetime.now(tz=timezone.utc)
@@ -589,6 +580,15 @@ class BotDispatcher:
             user = await repo.get_user(session, telegram_id)
             if user is None:
                 await self.send(telegram_id, "Send /start first.")
+                return
+            ai_config = await repo.get_ai_config(session)
+            if not ai_config["available"]:
+                await self.send(
+                    telegram_id,
+                    "🤖 <b>AI Coach</b>\n\n"
+                    "The AI coach isn't enabled yet. An admin can turn it on from "
+                    "the dashboard (pick a provider and set an API key).",
+                )
                 return
             trades = await repo.get_trades_in_range(session, user.id, since=since, until=until)
             journals = await repo.get_journals_in_range(session, user.id, since=since, until=until)
@@ -625,7 +625,7 @@ class BotDispatcher:
             emotion_scores=emotion_dicts,
             period_label=f"Last {days} days ({since_str} → {until_str})",
         )
-        review = await hermes_service.generate_review(context)
+        review = await hermes_service.generate_review(context, ai_config)
 
         await self.send(
             telegram_id,

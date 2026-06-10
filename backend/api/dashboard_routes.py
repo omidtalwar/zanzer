@@ -75,6 +75,45 @@ _PAGE = """<!doctype html>
         </div>
       </div>
     </div>
+    <div class="card"><h2>🤖 AI Coach</h2>
+      <div style="padding:14px 16px; display:grid; gap:10px; max-width:560px">
+        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+          <label class="muted" style="width:90px">Enabled</label>
+          <select id="ai_enabled" style="background:#0d1117;border:1px solid var(--line);color:var(--txt);border-radius:6px;padding:7px">
+            <option value="true">On</option><option value="false">Off</option>
+          </select>
+        </div>
+        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+          <label class="muted" style="width:90px">Provider</label>
+          <select id="ai_provider" style="background:#0d1117;border:1px solid var(--line);color:var(--txt);border-radius:6px;padding:7px">
+            <option value="openai">OpenAI</option><option value="claude">Claude (Anthropic)</option>
+          </select>
+        </div>
+        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+          <label class="muted" style="width:90px">OpenAI model</label>
+          <input id="ai_openai_model" placeholder="gpt-4o-mini" style="flex:1"/>
+        </div>
+        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+          <label class="muted" style="width:90px">Claude model</label>
+          <input id="ai_anthropic_model" placeholder="claude-sonnet-4-6" style="flex:1"/>
+        </div>
+        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+          <label class="muted" style="width:90px">OpenAI key</label>
+          <input id="ai_openai_key" type="password" placeholder="(leave blank to keep)" style="flex:1"/>
+          <span id="ai_openai_hint" class="muted"></span>
+        </div>
+        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+          <label class="muted" style="width:90px">Claude key</label>
+          <input id="ai_anthropic_key" type="password" placeholder="(leave blank to keep)" style="flex:1"/>
+          <span id="ai_anthropic_hint" class="muted"></span>
+        </div>
+        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+          <button onclick="saveAI()">Save AI settings</button>
+          <button class="s" onclick="testAI()">Test connection</button>
+          <span id="ai_res" class="muted"></span>
+        </div>
+      </div>
+    </div>
     <div class="card"><h2>Pending payments</h2><table id="pay"><thead><tr>
       <th>ID</th><th>User</th><th>Amount</th><th>TX</th><th>Action</th></tr></thead><tbody></tbody></table></div>
     <div class="card"><h2>Users &amp; subscriptions</h2><table id="users"><thead><tr>
@@ -127,6 +166,44 @@ async function load(){
     `<tr><td>${a.id}</td><td>${a.user_telegram_id}</td><td>${a.login}</td>
      <td>${a.server}</td><td>${pill(a.status)}</td></tr>`).join('') :
     '<tr><td colspan=5 class="muted">none</td></tr>';
+  loadAI();
+}
+async function loadAI(){
+  try {
+    const c = await api('/admin/ai-settings');
+    document.getElementById('ai_enabled').value = c.enabled ? 'true':'false';
+    document.getElementById('ai_provider').value = c.provider;
+    document.getElementById('ai_openai_model').value = c.openai_model||'';
+    document.getElementById('ai_anthropic_model').value = c.anthropic_model||'';
+    document.getElementById('ai_openai_hint').textContent = c.openai_key_set?('set '+c.openai_key_hint):'not set';
+    document.getElementById('ai_anthropic_hint').textContent = c.anthropic_key_set?('set '+c.anthropic_key_hint):'not set';
+    document.getElementById('ai_res').textContent = c.available?'✅ ready':'⚠️ not ready';
+  } catch(e){}
+}
+async function saveAI(){
+  const body = {
+    enabled: document.getElementById('ai_enabled').value==='true',
+    provider: document.getElementById('ai_provider').value,
+    openai_model: document.getElementById('ai_openai_model').value.trim(),
+    anthropic_model: document.getElementById('ai_anthropic_model').value.trim(),
+    openai_api_key: document.getElementById('ai_openai_key').value.trim(),
+    anthropic_api_key: document.getElementById('ai_anthropic_key').value.trim(),
+  };
+  document.getElementById('ai_res').textContent='Saving…';
+  await api('/admin/ai-settings',{method:'POST',
+    headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  document.getElementById('ai_openai_key').value='';
+  document.getElementById('ai_anthropic_key').value='';
+  document.getElementById('ai_res').textContent='Saved.';
+  loadAI();
+}
+async function testAI(){
+  document.getElementById('ai_res').textContent='Testing…';
+  try {
+    const r = await api('/admin/ai-settings/test',{method:'POST'});
+    document.getElementById('ai_res').textContent = r.ok?
+      `✅ ${r.provider}/${r.model}: ${r.sample}` : `⚠️ ${r.sample}`;
+  } catch(e){ document.getElementById('ai_res').textContent='⚠️ test failed (check key/model)'; }
 }
 function stat(n,l){ return `<div class="stat"><div class="n">${n}</div><div class="l">${l}</div></div>`; }
 async function broadcast(){

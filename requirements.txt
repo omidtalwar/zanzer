@@ -30,5 +30,6 @@ alembic>=1.13           # database migrations (production)
 MetaTrader5
 
 # --- Phase 6: AI Performance Coach (Hermes) + analytics charts ---
-openai>=1.0              # AI coach; uses OPENAI_API_KEY. cp314 wheel available.
+openai>=1.0              # AI coach (OpenAI provider). cp314 wheel available.
+anthropic>=0.40          # AI coach (Claude provider) — admin-swappable at runtime.
 matplotlib>=3.10         # equity/drawdown/emotion charts for /monthly (ships cp314 wheels)
