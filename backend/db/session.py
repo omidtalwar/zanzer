@@ -49,8 +49,8 @@ _SQLITE_COLUMN_ADDS = [
     ("users", "tos_accepted_at", "ALTER TABLE users ADD COLUMN tos_accepted_at TIMESTAMP"),
     ("risk_settings", "max_daily_loss_usd", "ALTER TABLE risk_settings ADD COLUMN max_daily_loss_usd FLOAT DEFAULT 0.0"),
     ("account_snapshots", "yesterday_json", "ALTER TABLE account_snapshots ADD COLUMN yesterday_json TEXT"),
-    # V3 — trade journal tables are created by create_all on first run;
-    # no ALTER needed unless columns are added after initial V3 release.
+    ("locks", "explanation", "ALTER TABLE locks ADD COLUMN explanation TEXT"),
+    # V3/V4 — emotion_scores and trade journal tables created by create_all on first run.
 ]
 
 

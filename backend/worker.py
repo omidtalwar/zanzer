@@ -35,6 +35,12 @@ from backend.models import (
 )
 from backend.services import telegram_service
 from backend.services.enforcement_service import decide_actions
+from backend.services.psychology_service import (
+    LOCK_THRESHOLD,
+    compute_day_score,
+    score_emoji,
+    score_label,
+)
 from backend.services.risk_service import compute_risk_status
 
 log = get_logger("worker")
@@ -119,6 +125,10 @@ class AccountWorker:
         self._alerted: set[tuple[str, str]] = set()  # (date, reason) dedup
         # Ticket set from the previous cycle — used to detect opens/closes.
         self._prev_tickets: set[int] = set()
+        # Psychology engine: timestamp of the most-recent closing losing trade.
+        self._last_loss_closed_at: datetime | None = None
+        # Track the newest position opened this cycle for revenge detection.
+        self._new_position_opened_at: datetime | None = None
 
     # Reminder windows: send a reminder after these many minutes without a journal response.
     _REMINDER_MINUTES = [5, 15, 30]
@@ -182,6 +192,7 @@ class AccountWorker:
         """Detect positions that weren't open last cycle → open_trade + entry prompt."""
         current_tickets = {p.ticket for p in current_positions}
         new_tickets = current_tickets - self._prev_tickets
+        self._new_position_opened_at = None  # reset each cycle
 
         for pos in current_positions:
             if pos.ticket not in new_tickets:
@@ -197,6 +208,7 @@ class AccountWorker:
                 tp=pos.tp if pos.tp else None,
                 opened_at=pos.time,
             )
+            self._new_position_opened_at = pos.time  # for revenge detection
             await self.notify(self._entry_prompt(pos))
             log.info("journal: new trade %s (ticket=%s)", trade.id, pos.ticket)
 
@@ -226,6 +238,9 @@ class AccountWorker:
                 session, trade,
                 exit_price=exit_price, profit=profit, closed_at=closed_at,
             )
+            # Track last losing close for revenge detection next cycle.
+            if profit < 0:
+                self._last_loss_closed_at = closed_at
             pos_data = {
                 "profit": profit,
                 "duration_s": trade.duration_s,
@@ -287,6 +302,67 @@ class AccountWorker:
                         + self._exit_prompt(trade, pos_data)
                     )
 
+    async def _run_psychology_cycle(self, session, server_date: str) -> None:
+        """Compute today's emotion score, persist it, auto-lock if < threshold."""
+        trades, journals = await repo.get_today_trades_with_journals(session, self.user_id, server_date)
+
+        trade_dicts = [
+            {
+                "id": t.id, "profit": t.profit, "status": t.status,
+                "entry_journal_id": t.entry_journal_id,
+                "exit_journal_id": t.exit_journal_id,
+                "entry_prompted_at": t.entry_prompted_at,
+                "opened_at": t.opened_at,
+            }
+            for t in trades
+        ]
+        journal_dicts = [
+            {
+                "trade_id": j.trade_id, "type": j.type,
+                "plan_followed": j.plan_followed, "skipped": j.skipped,
+            }
+            for j in journals
+        ]
+
+        import json as _json
+        day = compute_day_score(
+            today_trades=trade_dicts,
+            today_journals=journal_dicts,
+            last_loss_closed_at=self._last_loss_closed_at,
+            new_position_opened_at=self._new_position_opened_at,
+            date=server_date,
+        )
+
+        events_json = _json.dumps(
+            [{"reason": e.reason, "delta": e.delta, "ts": e.ts} for e in day.events]
+        )
+        await repo.upsert_emotion_score(
+            session, self.user_id, server_date,
+            score=day.score, events_json=events_json,
+            locked_by_score=day.locked_by_score,
+        )
+
+        # Auto-lock if score just dropped below threshold (once per day).
+        if day.locked_by_score:
+            lock_row = await repo.get_lock(session, self.user_id)
+            if not lock_row.locked:
+                await repo.set_lock(
+                    session, self.user_id,
+                    f"Emotion score {day.score}/100 — below {LOCK_THRESHOLD}",
+                    daily=True,
+                )
+                await repo.add_risk_event(
+                    session, self.user_id, "PSYCH_LOCK",
+                    f"Score dropped to {day.score} on {server_date}",
+                )
+                emoji = score_emoji(day.score)
+                await self.notify(
+                    f"{emoji} <b>Trading locked — emotion score too low</b>\n\n"
+                    f"Your score is <b>{day.score}/100</b> ({score_label(day.score)}).\n\n"
+                    f"This lock holds until the next trading day.\n"
+                    f"Send /explain to record what happened — it's saved to your journal."
+                )
+
     async def _refresh_limits(self) -> None:
         """Reload this user's risk settings so rule changes apply without a
         worker restart (within one cycle)."""
@@ -339,6 +415,15 @@ class AccountWorker:
             log.warning("journal cycle error for user %s: %s", self.user_id, exc)
         finally:
             self._prev_tickets = {p.ticket for p in status.open_positions}
+
+        # V4 — psychology engine: score + revenge detection + auto-lock.
+        try:
+            offset = self.broker.get_server_offset()
+            server_date = (datetime.now(tz=timezone.utc) + offset).strftime("%Y-%m-%d")
+            async with self._session_factory() as session:
+                await self._run_psychology_cycle(session, server_date)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("psychology cycle error for user %s: %s", self.user_id, exc)
 
         # Successful read → the account is live/monitored.
         if self.account_id is not None:

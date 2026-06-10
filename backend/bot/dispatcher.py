@@ -19,6 +19,7 @@ from backend import repositories as repo
 from backend.config import settings
 from backend.db.session import SessionLocal
 from backend.logging_config import get_logger
+from backend.services.psychology_service import score_emoji, score_label
 
 log = get_logger("bot")
 
@@ -39,11 +40,15 @@ DISCLAIMER = (
 
 HELP = (
     "<b>Commands</b>\n"
-    "/status — your account, subscription &amp; risk\n"
+    "/status — your account, subscription, risk &amp; emotion score\n"
+    "/today — today's trades, P&amp;L &amp; emotion score\n"
     "/yesterday — yesterday's trade performance &amp; sessions\n"
+    "/weekly [7|30] — weekly performance report\n"
+    "/performance — all-time stats\n"
     "/trades — your recent trade history\n"
     "/journal — view unjournaled trades &amp; recent journals\n"
     "/journal &lt;id&gt; — fill in the journal for a specific trade\n"
+    "/explain — record why you broke discipline (when locked by score)\n"
     "/link — connect your MT5 account\n"
     "/risk — view your risk rules\n"
     "/setrisk — set your rules (I guide you step by step)\n"
@@ -139,7 +144,9 @@ class BotDispatcher:
 
         handlers = {
             "start": self._start, "agree": self._agree, "menu": self._menu, "status": self._status,
-            "yesterday": self._yesterday, "trades": self._trades, "journal": self._journal,
+            "today": self._today, "yesterday": self._yesterday,
+            "weekly": self._weekly, "performance": self._performance,
+            "trades": self._trades, "journal": self._journal, "explain": self._explain,
             "link": self._link_start, "risk": self._risk, "setrisk": self._setrisk,
             "lock": self._lock, "unlock": self._unlock, "subscribe": self._subscribe,
             "paid": self._paid, "stars": self._stars,
@@ -211,6 +218,9 @@ class BotDispatcher:
             lock = await repo.get_lock(session, user.id)
             snap = await repo.get_snapshot(session, user.id)
             unjournaled = await repo.get_unjournaled_trades(session, user.id)
+            from datetime import timezone as _tz
+            today_str = datetime.now(tz=_tz.utc).strftime("%Y-%m-%d")
+            emotion_row = await repo.get_emotion_score(session, user.id, today_str)
         lines = [
             "<b>📊 Your Status</b>",
             f"Subscription: <b>{'active' if active else 'inactive'}</b> ({_esc(user.subscription.status)})",
@@ -246,7 +256,13 @@ class BotDispatcher:
             )
             lines.append(f"Risk: {'🔴 LIMIT HIT' if snap.any_limit_hit else '🟢 OK'}")
             lines.append(f"<i>Updated {_ago(snap.updated_at)}</i>")
-        else:
+        if emotion_row is not None:
+            em = score_emoji(emotion_row.score)
+            lines.append(
+                f"🧠 Emotion score: {em} <b>{emotion_row.score}/100</b> "
+                f"— {_esc(score_label(emotion_row.score))}"
+            )
+        if snap is None:
             lines.append(
                 f"\nRisk rules: {rs.max_trades_per_day} trades/day, {rs.max_daily_loss_pct:.0f}% "
                 f"daily loss, {rs.max_consecutive_losses} losses, {rs.max_account_exposure_pct:.0f}% exposure"
@@ -331,6 +347,201 @@ class BotDispatcher:
                 f"<b>{profit:+.2f}</b> | {dur} | {session}"
             )
 
+        await self.send(telegram_id, "\n".join(lines))
+
+    # ----------------------------------------------------------------- /today
+    async def _today(self, telegram_id, username, arg) -> None:
+        async with self._sf() as session:
+            user = await repo.get_user(session, telegram_id)
+            if user is None:
+                await self.send(telegram_id, "Send /start first.")
+                return
+            today_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+            snap = await repo.get_snapshot(session, user.id)
+            emotion_row = await repo.get_emotion_score(session, user.id, today_str)
+            trades = await repo.get_trades_in_range(
+                session, user.id,
+                since=datetime.now(tz=timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0),
+                until=datetime.now(tz=timezone.utc),
+            )
+
+        lines = [f"📅 <b>Today — {today_str}</b>", ""]
+
+        # Emotion score block.
+        if emotion_row:
+            em = score_emoji(emotion_row.score)
+            lines.append(f"🧠 Emotion score: {em} <b>{emotion_row.score}/100</b> — {_esc(score_label(emotion_row.score))}")
+            lines.append("")
+
+        # Account snapshot block.
+        if snap:
+            lines.append(f"💰 P&amp;L: <b>{snap.daily_loss:+,.2f} {_esc(snap.currency)}</b> ({snap.daily_loss_pct:+.2f}%)")
+            lines.append(f"Trades: {snap.trades_today} | Open: {snap.open_positions} | Exposure: {snap.exposure_pct:.1f}%")
+            lines.append("")
+
+        # Trade list.
+        closed = [t for t in trades if t.status != "open"]
+        wins = [t for t in closed if (t.profit or 0) > 0]
+        losses = [t for t in closed if (t.profit or 0) <= 0]
+        if closed:
+            win_rate = round(len(wins) / len(closed) * 100)
+            lines.append(f"Completed trades: <b>{len(closed)}</b> | Win rate: <b>{win_rate}%</b>")
+            for t in trades:
+                profit_str = f"{t.profit:+.2f}" if t.profit is not None else "open"
+                emoji = "✅" if (t.profit or 0) > 0 else ("🔵" if t.status == "open" else "❌")
+                dur = _fmt_duration(t.duration_s)
+                lines.append(f"  {emoji} {_esc(t.symbol)} {_esc(t.direction)} {_esc(profit_str)} | {dur}")
+        else:
+            lines.append("<i>No completed trades today.</i>")
+
+        await self.send(telegram_id, "\n".join(lines))
+
+    # --------------------------------------------------------------- /explain
+    async def _explain(self, telegram_id, username, arg) -> None:
+        async with self._sf() as session:
+            user = await repo.get_user(session, telegram_id)
+            if user is None:
+                await self.send(telegram_id, "Send /start first.")
+                return
+            lock = await repo.get_lock(session, user.id)
+            if not lock.locked:
+                await self.send(
+                    telegram_id,
+                    "You're not currently locked — /explain is only needed when "
+                    "your emotion score drops below 50 and trading is auto-locked.",
+                )
+                return
+            explanation = arg.strip()
+            if not explanation:
+                await self.send(
+                    telegram_id,
+                    "📝 <b>Explain yourself</b>\n\n"
+                    "Your trading is locked because your emotion score dropped too low.\n"
+                    "Write what happened: what triggered the poor trades, "
+                    "how you were feeling, and what you'll do differently.\n\n"
+                    "<b>Usage:</b> /explain &lt;your reflection here&gt;\n\n"
+                    "<i>Your explanation is saved to your journal. "
+                    "The lock still clears automatically at the next trading day.</i>",
+                )
+                return
+            await repo.save_lock_explanation(session, user.id, explanation)
+
+        await self.send(
+            telegram_id,
+            "✅ <b>Reflection saved.</b>\n\n"
+            f"<i>\"{_esc(explanation[:200])}\"</i>\n\n"
+            "The lock clears automatically at the next trading day. "
+            "Use this time to review your journal and reset your mindset.\n\n"
+            "📖 /journal to review your trades.",
+        )
+
+    # -------------------------------------------------------------- /weekly
+    async def _weekly(self, telegram_id, username, arg) -> None:
+        days = 7
+        if arg.strip() in ("30", "month"):
+            days = 30
+        async with self._sf() as session:
+            user = await repo.get_user(session, telegram_id)
+            if user is None:
+                await self.send(telegram_id, "Send /start first.")
+                return
+            until = datetime.now(tz=timezone.utc)
+            since = until.replace(hour=0, minute=0, second=0, microsecond=0)
+            from datetime import timedelta
+            since = since - timedelta(days=days - 1)
+            trades = await repo.get_trades_in_range(session, user.id, since=since, until=until)
+            since_str = since.strftime("%Y-%m-%d")
+            until_str = until.strftime("%Y-%m-%d")
+            # Emotion scores for the period.
+            emotion_rows = await repo.get_emotion_scores_in_range(
+                session, user.id, since_str, until_str
+            )
+
+        closed = [t for t in trades if t.profit is not None]
+        wins = [t for t in closed if t.profit > 0]
+        losses = [t for t in closed if t.profit <= 0]
+        total_pnl = round(sum(t.profit for t in closed), 2)
+        win_rate = round(len(wins) / len(closed) * 100) if closed else 0
+
+        # Best/worst symbol by total profit.
+        by_symbol: dict[str, float] = {}
+        for t in closed:
+            by_symbol[t.symbol] = round(by_symbol.get(t.symbol, 0) + (t.profit or 0), 2)
+        best_sym = max(by_symbol, key=by_symbol.get) if by_symbol else "—"
+        worst_sym = min(by_symbol, key=by_symbol.get) if by_symbol else "—"
+
+        # Avg emotion score.
+        avg_score = round(sum(r.score for r in emotion_rows) / len(emotion_rows)) if emotion_rows else None
+
+        # Journal completion rate.
+        journaled = sum(1 for t in closed if t.entry_journal_id and t.exit_journal_id)
+        journal_rate = round(journaled / len(closed) * 100) if closed else 0
+
+        label = f"Last {days} days" if days > 7 else "Last 7 days"
+        lines = [
+            f"📊 <b>{label} — {since_str} → {until_str}</b>", "",
+            f"Trades: <b>{len(closed)}</b> | Win rate: <b>{win_rate}%</b>",
+            f"Net P&amp;L: <b>{total_pnl:+.2f}</b>",
+            f"Wins: {len(wins)} | Losses: {len(losses)}",
+            "",
+            f"Best pair: <b>{_esc(best_sym)}</b> ({by_symbol.get(best_sym, 0):+.2f})",
+            f"Worst pair: <b>{_esc(worst_sym)}</b> ({by_symbol.get(worst_sym, 0):+.2f})",
+            "",
+            f"Journal completion: <b>{journal_rate}%</b> ({journaled}/{len(closed) if closed else 0} trades)",
+        ]
+        if avg_score is not None:
+            em = score_emoji(avg_score)
+            lines.append(f"Avg emotion score: {em} <b>{avg_score}/100</b>")
+        if days == 7:
+            lines.append("\n<i>For 30-day view: /weekly 30</i>")
+        await self.send(telegram_id, "\n".join(lines))
+
+    # ---------------------------------------------------------- /performance
+    async def _performance(self, telegram_id, username, arg) -> None:
+        async with self._sf() as session:
+            user = await repo.get_user(session, telegram_id)
+            if user is None:
+                await self.send(telegram_id, "Send /start first.")
+                return
+            trades = await repo.get_recent_trades(session, user.id, limit=500)
+
+        closed = [t for t in trades if t.profit is not None]
+        if not closed:
+            await self.send(telegram_id, "📈 <b>Performance</b>\n\n<i>No completed trades yet.</i>")
+            return
+
+        wins = [t for t in closed if t.profit > 0]
+        losses = [t for t in closed if t.profit <= 0]
+        total_pnl = round(sum(t.profit for t in closed), 2)
+        win_rate = round(len(wins) / len(closed) * 100)
+        avg_win = round(sum(t.profit for t in wins) / len(wins), 2) if wins else 0
+        avg_loss = round(sum(t.profit for t in losses) / len(losses), 2) if losses else 0
+        profit_factor = round(abs(sum(t.profit for t in wins)) / abs(sum(t.profit for t in losses)), 2) if losses and any(t.profit < 0 for t in losses) else "∞"
+        avg_dur = _fmt_duration(int(sum(t.duration_s for t in closed if t.duration_s) / max(1, sum(1 for t in closed if t.duration_s))))
+
+        by_symbol: dict[str, float] = {}
+        for t in closed:
+            by_symbol[t.symbol] = round(by_symbol.get(t.symbol, 0) + t.profit, 2)
+        best_sym = max(by_symbol, key=by_symbol.get)
+        worst_sym = min(by_symbol, key=by_symbol.get)
+
+        journaled = sum(1 for t in closed if t.entry_journal_id and t.exit_journal_id)
+        skipped = sum(1 for t in closed if t.status in ("entry_skipped", "exit_skipped"))
+
+        lines = [
+            "📈 <b>All-time Performance</b>", "",
+            f"Total trades: <b>{len(closed)}</b> | Win rate: <b>{win_rate}%</b>",
+            f"Net P&amp;L: <b>{total_pnl:+.2f}</b>",
+            f"Profit factor: <b>{profit_factor}</b>",
+            f"Avg win: <b>{avg_win:+.2f}</b> | Avg loss: <b>{avg_loss:+.2f}</b>",
+            f"Avg hold time: <b>{avg_dur}</b>",
+            "",
+            f"Best pair: <b>{_esc(best_sym)}</b> ({by_symbol[best_sym]:+.2f})",
+            f"Worst pair: <b>{_esc(worst_sym)}</b> ({by_symbol[worst_sym]:+.2f})",
+            "",
+            f"Journal completion: <b>{round(journaled / len(closed) * 100)}%</b> "
+            f"({journaled}/{len(closed)}) | Skipped: {skipped}",
+        ]
         await self.send(telegram_id, "\n".join(lines))
 
     # ---------------------------------------------------------------- /trades

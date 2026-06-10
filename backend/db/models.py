@@ -111,6 +111,8 @@ class Lock(Base):
     reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     day: Mapped[str | None] = mapped_column(String(10), nullable=True)  # YYYY-MM-DD (daily lock)
+    # Trader's explanation when locked by psychology engine (score < 50).
+    explanation: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="lock")
 
@@ -206,6 +208,24 @@ class Trade(Base):
     # open | closed | entry_skipped | exit_skipped
     status: Mapped[str] = mapped_column(String(24), default="open")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class EmotionScore(Base):
+    """Daily emotion/discipline score per user. One row per user per date.
+
+    Score starts at 100 and is deducted each cycle by the psychology engine.
+    Falls below 50 → auto-lock + alert. Resets next trading day.
+    """
+    __tablename__ = "emotion_scores"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    date: Mapped[str] = mapped_column(String(10), index=True)  # YYYY-MM-DD server day
+    score: Mapped[int] = mapped_column(Integer, default=100)
+    # JSON list of deduction events: [{"reason": "...", "delta": -10, "ts": "..."}]
+    events_json: Mapped[str] = mapped_column(Text, default="[]")
+    locked_by_score: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class TradeJournal(Base):

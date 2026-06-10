@@ -15,6 +15,7 @@ from sqlalchemy.orm import selectinload
 from backend.config import settings
 from backend.db.models import (
     AccountSnapshot,
+    EmotionScore,
     Lock,
     MT5Account,
     Payment,
@@ -576,3 +577,103 @@ async def get_journal_for_trade(
         )
     )
     return result.scalar_one_or_none()
+
+
+async def get_today_trades_with_journals(
+    session: AsyncSession, user_id: int, date_str: str
+) -> tuple[list[Trade], list[TradeJournal]]:
+    """Return today's trades and all their journals for the psychology engine."""
+    result = await session.execute(
+        select(Trade).where(
+            Trade.user_id == user_id,
+            Trade.opened_at >= _utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            - __import__("datetime").timedelta(days=1),
+        ).order_by(Trade.opened_at)
+    )
+    trades = list(result.scalars().all())
+    trade_ids = [t.id for t in trades]
+    journals: list[TradeJournal] = []
+    if trade_ids:
+        jresult = await session.execute(
+            select(TradeJournal).where(TradeJournal.trade_id.in_(trade_ids))
+        )
+        journals = list(jresult.scalars().all())
+    return trades, journals
+
+
+async def get_trades_in_range(
+    session: AsyncSession, user_id: int,
+    since: "datetime", until: "datetime",
+) -> list[Trade]:
+    result = await session.execute(
+        select(Trade).where(
+            Trade.user_id == user_id,
+            Trade.opened_at >= since,
+            Trade.opened_at <= until,
+        ).order_by(Trade.opened_at.desc())
+    )
+    return list(result.scalars().all())
+
+
+# ---------------------------------------------------------------------------
+# V4 — Emotion score repositories
+# ---------------------------------------------------------------------------
+
+async def upsert_emotion_score(
+    session: AsyncSession, user_id: int, date_str: str,
+    score: int, events_json: str, locked_by_score: bool,
+) -> EmotionScore:
+    result = await session.execute(
+        select(EmotionScore).where(
+            EmotionScore.user_id == user_id,
+            EmotionScore.date == date_str,
+        )
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        row = EmotionScore(user_id=user_id, date=date_str)
+        session.add(row)
+    row.score = score
+    row.events_json = events_json
+    row.locked_by_score = locked_by_score
+    row.updated_at = _utcnow()
+    await session.commit()
+    await session.refresh(row)
+    return row
+
+
+async def get_emotion_score(
+    session: AsyncSession, user_id: int, date_str: str
+) -> EmotionScore | None:
+    result = await session.execute(
+        select(EmotionScore).where(
+            EmotionScore.user_id == user_id,
+            EmotionScore.date == date_str,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_emotion_scores_in_range(
+    session: AsyncSession, user_id: int, since_date: str, until_date: str
+) -> list[EmotionScore]:
+    result = await session.execute(
+        select(EmotionScore).where(
+            EmotionScore.user_id == user_id,
+            EmotionScore.date >= since_date,
+            EmotionScore.date <= until_date,
+        ).order_by(EmotionScore.date.desc())
+    )
+    return list(result.scalars().all())
+
+
+async def save_lock_explanation(
+    session: AsyncSession, user_id: int, explanation: str
+) -> None:
+    result = await session.execute(
+        select(Lock).where(Lock.user_id == user_id)
+    )
+    lock = result.scalar_one_or_none()
+    if lock:
+        lock.explanation = explanation
+        await session.commit()
