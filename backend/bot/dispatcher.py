@@ -19,6 +19,7 @@ from backend import repositories as repo
 from backend.config import settings
 from backend.db.session import SessionLocal
 from backend.logging_config import get_logger
+from backend.services.analytics_service import compute_metrics, fmt_pf, fmt_rr
 from backend.services.psychology_service import score_emoji, score_label
 
 log = get_logger("bot")
@@ -76,6 +77,14 @@ def _fmt_duration(secs: int | None) -> str:
         return f"{m}m"
     h, rem = divmod(m, 60)
     return f"{h}h {rem}m" if rem else f"{h}h"
+
+
+def _trades_to_dicts(trades) -> list[dict]:
+    """ORM Trade rows → plain dicts for analytics_service.compute_metrics."""
+    return [
+        {"profit": t.profit, "symbol": t.symbol, "duration_s": t.duration_s}
+        for t in trades
+    ]
 
 
 def _ago(ts: datetime) -> str:
@@ -379,16 +388,23 @@ class BotDispatcher:
             lines.append(f"Trades: {snap.trades_today} | Open: {snap.open_positions} | Exposure: {snap.exposure_pct:.1f}%")
             lines.append("")
 
-        # Trade list.
-        closed = [t for t in trades if t.status != "open"]
-        wins = [t for t in closed if (t.profit or 0) > 0]
-        losses = [t for t in closed if (t.profit or 0) <= 0]
-        if closed:
-            win_rate = round(len(wins) / len(closed) * 100)
-            lines.append(f"Completed trades: <b>{len(closed)}</b> | Win rate: <b>{win_rate}%</b>")
+        # Trade list + standard metrics.
+        m = compute_metrics(_trades_to_dicts(trades))
+        if m is not None:
+            lines.append(
+                f"Completed trades: <b>{m.total_trades}</b> | Win rate: <b>{m.win_rate:g}%</b> · "
+                f"PF: <b>{fmt_pf(m.profit_factor)}</b> · Avg RR: <b>{fmt_rr(m.payoff_ratio)}</b>"
+            )
             for t in trades:
                 profit_str = f"{t.profit:+.2f}" if t.profit is not None else "open"
-                emoji = "✅" if (t.profit or 0) > 0 else ("🔵" if t.status == "open" else "❌")
+                if t.status == "open":
+                    emoji = "🔵"
+                elif (t.profit or 0) > 0:
+                    emoji = "✅"
+                elif (t.profit or 0) < 0:
+                    emoji = "❌"
+                else:
+                    emoji = "➖"  # breakeven
                 dur = _fmt_duration(t.duration_s)
                 lines.append(f"  {emoji} {_esc(t.symbol)} {_esc(t.direction)} {_esc(profit_str)} | {dur}")
         else:
@@ -457,37 +473,40 @@ class BotDispatcher:
                 session, user.id, since_str, until_str
             )
 
+        m = compute_metrics(_trades_to_dicts(trades))
+        label = f"Last {days} days" if days > 7 else "Last 7 days"
+
+        if m is None:
+            await self.send(
+                telegram_id,
+                f"📊 <b>{label} — {since_str} → {until_str}</b>\n\n"
+                "<i>No completed trades in this period.</i>",
+            )
+            return
+
+        # Journal completion rate (closed trades that have both journals).
         closed = [t for t in trades if t.profit is not None]
-        wins = [t for t in closed if t.profit > 0]
-        losses = [t for t in closed if t.profit <= 0]
-        total_pnl = round(sum(t.profit for t in closed), 2)
-        win_rate = round(len(wins) / len(closed) * 100) if closed else 0
-
-        # Best/worst symbol by total profit.
-        by_symbol: dict[str, float] = {}
-        for t in closed:
-            by_symbol[t.symbol] = round(by_symbol.get(t.symbol, 0) + (t.profit or 0), 2)
-        best_sym = max(by_symbol, key=by_symbol.get) if by_symbol else "—"
-        worst_sym = min(by_symbol, key=by_symbol.get) if by_symbol else "—"
-
-        # Avg emotion score.
-        avg_score = round(sum(r.score for r in emotion_rows) / len(emotion_rows)) if emotion_rows else None
-
-        # Journal completion rate.
         journaled = sum(1 for t in closed if t.entry_journal_id and t.exit_journal_id)
         journal_rate = round(journaled / len(closed) * 100) if closed else 0
+        avg_score = round(sum(r.score for r in emotion_rows) / len(emotion_rows)) if emotion_rows else None
 
-        label = f"Last {days} days" if days > 7 else "Last 7 days"
+        be = f" | Breakeven: {m.breakeven}" if m.breakeven else ""
         lines = [
             f"📊 <b>{label} — {since_str} → {until_str}</b>", "",
-            f"Trades: <b>{len(closed)}</b> | Win rate: <b>{win_rate}%</b>",
-            f"Net P&amp;L: <b>{total_pnl:+.2f}</b>",
-            f"Wins: {len(wins)} | Losses: {len(losses)}",
+            f"Trades: <b>{m.total_trades}</b> | Win rate: <b>{m.win_rate:g}%</b>",
+            f"Net P&amp;L: <b>{m.net_pnl:+.2f}</b> "
+            f"(gross +{m.gross_profit:.2f} / −{m.gross_loss:.2f})",
+            f"Wins: {m.wins} | Losses: {m.losses}{be}",
             "",
-            f"Best pair: <b>{_esc(best_sym)}</b> ({by_symbol.get(best_sym, 0):+.2f})",
-            f"Worst pair: <b>{_esc(worst_sym)}</b> ({by_symbol.get(worst_sym, 0):+.2f})",
+            f"Profit factor: <b>{fmt_pf(m.profit_factor)}</b> · "
+            f"Avg RR: <b>{fmt_rr(m.payoff_ratio)}</b>",
+            f"Expectancy: <b>{m.expectancy:+.2f}/trade</b>"
+            + (f" ({m.expectancy_r:+.2f}R)" if m.expectancy_r is not None else ""),
             "",
-            f"Journal completion: <b>{journal_rate}%</b> ({journaled}/{len(closed) if closed else 0} trades)",
+            f"Best pair: <b>{_esc(m.best_symbol or '—')}</b> ({m.best_symbol_pnl:+.2f})",
+            f"Worst pair: <b>{_esc(m.worst_symbol or '—')}</b> ({m.worst_symbol_pnl:+.2f})",
+            "",
+            f"Journal completion: <b>{journal_rate}%</b> ({journaled}/{len(closed)} trades)",
         ]
         if avg_score is not None:
             em = score_emoji(avg_score)
@@ -505,42 +524,37 @@ class BotDispatcher:
                 return
             trades = await repo.get_recent_trades(session, user.id, limit=500)
 
-        closed = [t for t in trades if t.profit is not None]
-        if not closed:
+        m = compute_metrics(_trades_to_dicts(trades))
+        if m is None:
             await self.send(telegram_id, "📈 <b>Performance</b>\n\n<i>No completed trades yet.</i>")
             return
 
-        wins = [t for t in closed if t.profit > 0]
-        losses = [t for t in closed if t.profit <= 0]
-        total_pnl = round(sum(t.profit for t in closed), 2)
-        win_rate = round(len(wins) / len(closed) * 100)
-        avg_win = round(sum(t.profit for t in wins) / len(wins), 2) if wins else 0
-        avg_loss = round(sum(t.profit for t in losses) / len(losses), 2) if losses else 0
-        profit_factor = round(abs(sum(t.profit for t in wins)) / abs(sum(t.profit for t in losses)), 2) if losses and any(t.profit < 0 for t in losses) else "∞"
-        avg_dur = _fmt_duration(int(sum(t.duration_s for t in closed if t.duration_s) / max(1, sum(1 for t in closed if t.duration_s))))
-
-        by_symbol: dict[str, float] = {}
-        for t in closed:
-            by_symbol[t.symbol] = round(by_symbol.get(t.symbol, 0) + t.profit, 2)
-        best_sym = max(by_symbol, key=by_symbol.get)
-        worst_sym = min(by_symbol, key=by_symbol.get)
-
+        closed = [t for t in trades if t.profit is not None]
         journaled = sum(1 for t in closed if t.entry_journal_id and t.exit_journal_id)
         skipped = sum(1 for t in closed if t.status in ("entry_skipped", "exit_skipped"))
+        avg_dur = _fmt_duration(m.avg_hold_s)
+        be = f" | Breakeven: {m.breakeven}" if m.breakeven else ""
 
         lines = [
             "📈 <b>All-time Performance</b>", "",
-            f"Total trades: <b>{len(closed)}</b> | Win rate: <b>{win_rate}%</b>",
-            f"Net P&amp;L: <b>{total_pnl:+.2f}</b>",
-            f"Profit factor: <b>{profit_factor}</b>",
-            f"Avg win: <b>{avg_win:+.2f}</b> | Avg loss: <b>{avg_loss:+.2f}</b>",
+            f"Total trades: <b>{m.total_trades}</b> | Win rate: <b>{m.win_rate:g}%</b>",
+            f"Wins: {m.wins} | Losses: {m.losses}{be}",
+            f"Net P&amp;L: <b>{m.net_pnl:+.2f}</b> "
+            f"(gross +{m.gross_profit:.2f} / −{m.gross_loss:.2f})",
+            "",
+            f"Profit factor: <b>{fmt_pf(m.profit_factor)}</b>",
+            f"Avg RR (payoff): <b>{fmt_rr(m.payoff_ratio)}</b>",
+            f"Expectancy: <b>{m.expectancy:+.2f}/trade</b>"
+            + (f" ({m.expectancy_r:+.2f}R)" if m.expectancy_r is not None else ""),
+            f"Avg win: <b>{m.avg_win:+.2f}</b> | Avg loss: <b>−{m.avg_loss:.2f}</b>",
+            f"Largest win: <b>{m.largest_win:+.2f}</b> | Largest loss: <b>{m.largest_loss:+.2f}</b>",
             f"Avg hold time: <b>{avg_dur}</b>",
             "",
-            f"Best pair: <b>{_esc(best_sym)}</b> ({by_symbol[best_sym]:+.2f})",
-            f"Worst pair: <b>{_esc(worst_sym)}</b> ({by_symbol[worst_sym]:+.2f})",
+            f"Best pair: <b>{_esc(m.best_symbol or '—')}</b> ({m.best_symbol_pnl:+.2f})",
+            f"Worst pair: <b>{_esc(m.worst_symbol or '—')}</b> ({m.worst_symbol_pnl:+.2f})",
             "",
-            f"Journal completion: <b>{round(journaled / len(closed) * 100)}%</b> "
-            f"({journaled}/{len(closed)}) | Skipped: {skipped}",
+            f"Journal completion: <b>{round(journaled / m.total_trades * 100)}%</b> "
+            f"({journaled}/{m.total_trades}) | Skipped: {skipped}",
         ]
         await self.send(telegram_id, "\n".join(lines))
 
