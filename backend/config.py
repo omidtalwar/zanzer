@@ -118,6 +118,13 @@ class Settings(BaseSettings):
     # rule. e.g. 1.0 → a -$0.40 scratch won't extend a losing streak.
     breakeven_band: float = 1.0
 
+    # --- Marketing channel (aggregate, anonymized daily stats) ---
+    # Channel @username (e.g. @zanzerhq) or numeric id (e.g. -1001234567890).
+    # The bot must be an ADMIN of the channel. Leave blank to disable posting.
+    marketing_channel_id: str | None = None
+    # UTC hour (0–23) to post the daily community summary.
+    channel_post_hour_utc: int = 21
+
     # --- App ---
     app_env: str = "development"
 

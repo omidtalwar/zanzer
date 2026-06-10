@@ -132,7 +132,8 @@ _SECTION_TEXT = {
         "/accounts — list MT5 accounts\n"
         "/provision &lt;id&gt; — provision a terminal\n"
         "/unlock &lt;tid&gt; — remove a user's lock\n"
-        "/broadcast &lt;msg&gt; — announce to all users"
+        "/broadcast &lt;msg&gt; — announce to all users\n"
+        "/channelnow — post daily community summary to the channel"
     ),
 }
 
@@ -271,7 +272,7 @@ class BotDispatcher:
             "pending": self._admin_pending, "verify": self._admin_verify,
             "activate": self._admin_activate, "users": self._admin_users,
             "accounts": self._admin_accounts, "provision": self._admin_provision,
-            "broadcast": self._admin_broadcast,
+            "broadcast": self._admin_broadcast, "channelnow": self._admin_channelnow,
         }
         handler = handlers.get(cmd)
         if handler is None:
@@ -1878,6 +1879,27 @@ class BotDispatcher:
         await self.send(telegram_id, f"⏳ Provisioning terminal for account {_esc(arg)}…")
         result = await self.provisioner(int(arg))
         await self.send(telegram_id, f"Done: <code>{_esc(result)}</code>")
+
+    async def _admin_channelnow(self, telegram_id, username, arg) -> None:
+        """Preview/post the daily community summary to the marketing channel now."""
+        if not self._is_admin(telegram_id):
+            await self.send(telegram_id, "Not authorized.")
+            return
+        from backend import channel as channel_mod
+        if not settings.marketing_channel_id:
+            # No channel set yet — just show the admin the preview.
+            preview = await channel_mod.build_post()
+            await self.send(
+                telegram_id,
+                "ℹ️ MARKETING_CHANNEL_ID isn't set, so I can't post. Preview:\n\n" + preview,
+            )
+            return
+        ok = await channel_mod.post_now()
+        await self.send(
+            telegram_id,
+            f"✅ Posted to {_esc(settings.marketing_channel_id)}." if ok
+            else "❌ Post failed — is the bot an ADMIN of the channel, and the id correct?",
+        )
 
     async def _admin_broadcast(self, telegram_id, username, arg) -> None:
         """Send an announcement to every registered user."""

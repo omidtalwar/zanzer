@@ -21,7 +21,7 @@ import asyncio
 
 import uvicorn
 
-from backend import expiry
+from backend import channel, expiry
 from backend.admin_app import app as admin_app
 from backend.bot.app import run as run_bot
 from backend.config import settings
@@ -50,6 +50,7 @@ async def main() -> None:
         supervisor.run_forever(),
         expiry.run_forever(),
         run_payment_poller(),
+        channel.run_forever(),
         dashboard.serve(),
     )
 

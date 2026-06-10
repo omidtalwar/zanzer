@@ -784,6 +784,58 @@ async def get_emotion_scores_in_range(
     return list(result.scalars().all())
 
 
+async def community_stats(session: AsyncSession) -> dict:
+    """Aggregate, ANONYMIZED stats for today's marketing-channel post.
+    Never includes any individual user's data."""
+    now = _utcnow()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_str = _today_str()
+
+    users = (await session.execute(
+        select(User).options(selectinload(User.subscription))
+    )).scalars().all()
+    protected = sum(1 for u in users if subscription_is_active(u.subscription))
+
+    trades = (await session.execute(
+        select(Trade).where(Trade.opened_at >= today_start)
+    )).scalars().all()
+    trades_today = len(trades)
+    journaled = sum(1 for t in trades if t.entry_journal_id is not None)
+    journaled_pct = round(journaled / trades_today * 100) if trades_today else 0
+
+    lock_events = (await session.execute(
+        select(RiskEvent).where(
+            RiskEvent.created_at >= today_start,
+            RiskEvent.type.in_(["LOCK", "PSYCH_LOCK"]),
+        )
+    )).scalars().all()
+    accounts_locked = len({e.user_id for e in lock_events})
+
+    scores = (await session.execute(
+        select(EmotionScore).where(EmotionScore.date == today_str)
+    )).scalars().all()
+    avg_score = round(sum(s.score for s in scores) / len(scores)) if scores else None
+
+    revenge_blocked = 0
+    for s in scores:
+        try:
+            for ev in __import__("json").loads(s.events_json or "[]"):
+                if "revenge" in (ev.get("reason", "").lower()):
+                    revenge_blocked += 1
+        except Exception:  # noqa: BLE001
+            pass
+
+    return {
+        "date": today_str,
+        "protected": protected,
+        "trades_today": trades_today,
+        "journaled_pct": journaled_pct,
+        "accounts_locked": accounts_locked,
+        "revenge_blocked": revenge_blocked,
+        "avg_score": avg_score,
+    }
+
+
 async def save_lock_explanation(
     session: AsyncSession, user_id: int, explanation: str
 ) -> None:
