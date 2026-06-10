@@ -69,7 +69,22 @@ BASE_TERMINAL_DIR=C:\Program Files\MetaTrader 5
 TERMINALS_ROOT=C:\zanzer\terminals
 AUTO_PROVISION=true              # each account gets its own terminal
 DATABASE_URL=sqlite+aiosqlite:///./data/zanzer.db
+DASHBOARD_PORT=8090              # change if the port is taken on the box
+
+# AI Performance Coach (Hermes) — enables /coach. Leave key blank to disable.
+AI_PROVIDER=openai               # openai | claude
+OPENAI_API_KEY=...               # from platform.openai.com (kept out of git)
+OPENAI_MODEL=gpt-4o              # gpt-4o (best) or gpt-4o-mini (cheapest)
+AI_COACH_ENABLED=true
+# Optional, only if AI_PROVIDER=claude:
+# ANTHROPIC_API_KEY=...
+# ANTHROPIC_MODEL=claude-sonnet-4-6
 ```
+
+> The coach can also be configured **at runtime from the dashboard** (provider,
+> model, keys) — those override the `.env` values. The `.env` keys are just the
+> startup defaults. Requires `openai` (and `anthropic` if using Claude) — both
+> are already in `requirements.txt`, so step 4 installs them.
 Generate a fresh encryption key:
 ```powershell
 .\.venv\Scripts\python.exe -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
