@@ -323,6 +323,44 @@ async def test_admin_activate_requires_admin():
         settings.bot_admin_ids = None
 
 
+async def test_worker_prompted_exit_journal_resumes_from_db():
+    """Reproduces the cross-process bug: the worker sends the exit-journal
+    prompt (no bot FSM state); the user's free-text reply must resume the
+    journal from the DB rather than falling through to '/menu'."""
+    from datetime import datetime, timezone
+    Session = await _session_factory()
+    d, sent, _ = _make_dispatcher(Session)
+    await d.handle(telegram_id=55, username="t", text="/start")
+    async with Session() as s:
+        user = await repo.get_user(s, 55)
+        trade = await repo.open_trade(
+            s, user.id, ticket=1, symbol="EURUSD", direction="SELL",
+            volume=0.1, entry_price=1.1, sl=None, tp=None,
+            opened_at=datetime.now(tz=timezone.utc),
+        )
+        # Simulate the worker closing it (sets exit_prompted_at, status=closed).
+        await repo.close_trade(
+            s, trade, exit_price=1.1, profit=-0.08,
+            closed_at=datetime.now(tz=timezone.utc),
+        )
+    sent.clear()
+    # User answers the worker's "why did you exit?" prompt with no in-memory FSM.
+    await d.handle(telegram_id=55, username="t", text="manual")
+    # Must advance to question 2/5, NOT reply "Type /menu".
+    assert any("2/5" in t for _, t in sent), [t for _, t in sent]
+    assert not any("Type /menu" in t for _, t in sent)
+    # Finish the remaining steps; journal should save.
+    await d.handle(telegram_id=55, username="t", text="yes")       # plan
+    await d.handle(telegram_id=55, username="t", text="none")      # mistakes
+    await d.handle(telegram_id=55, username="t", text="calm")      # emotion
+    await d.handle(telegram_id=55, username="t", text="4")         # rating
+    async with Session() as s:
+        user = await repo.get_user(s, 55)
+        j = await repo.get_journal_for_trade(s, trade.id, "exit")
+        assert j is not None and not j.skipped
+        assert j.exit_reason == "manual" and j.rating == 4
+
+
 async def _run():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

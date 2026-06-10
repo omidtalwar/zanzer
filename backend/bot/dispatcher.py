@@ -148,6 +148,12 @@ class BotDispatcher:
             return
 
         if not text.startswith("/"):
+            # The journal prompt is sent by the WORKER process, which can't set
+            # this (bot-process) FSM state. So a free-text reply with no active
+            # flow may be the user answering a worker-sent journal prompt —
+            # resume it from the DB (most recently prompted unjournaled trade).
+            if await self._maybe_resume_journal(telegram_id, text):
+                return
             await self.send(telegram_id, "Type /menu to see what I can do.")
             return
 
@@ -883,6 +889,51 @@ class BotDispatcher:
             f"📷 Screenshot attached to trade <b>#{tid}</b> "
             f"({_esc(symbol)} {_esc(direction)}). View it anytime with /journal {tid}.",
         )
+
+    async def _maybe_resume_journal(self, telegram_id: int, text: str) -> bool:
+        """Resume a worker-prompted journal whose FSM isn't in bot memory.
+
+        The worker (separate process) sends the journal question but can't set
+        this dispatcher's in-memory state. When a user sends free text and we
+        have no active flow, look up their most-recently-prompted unjournaled
+        trade and start the matching FSM, feeding this message as the first
+        answer. Subsequent steps stay in-memory and flow normally.
+        Returns True if it consumed the message.
+        """
+        def _aware(ts):
+            if ts is None:
+                return None
+            return ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts
+
+        async with self._sf() as session:
+            user = await repo.get_user(session, telegram_id)
+            if user is None:
+                return False
+            unjournaled = await repo.get_unjournaled_trades(session, user.id)
+            if not unjournaled:
+                return False
+            best = None  # (prompted_at, trade_id, type)
+            for t in unjournaled:
+                if t.entry_journal_id is None and t.entry_prompted_at:
+                    ts = _aware(t.entry_prompted_at)
+                    if best is None or (ts and ts > best[0]):
+                        best = (ts, t.id, "entry")
+                if (t.status in ("closed", "entry_skipped")
+                        and t.exit_journal_id is None and t.exit_prompted_at):
+                    ts = _aware(t.exit_prompted_at)
+                    if best is None or (ts and ts > best[0]):
+                        best = (ts, t.id, "exit")
+            if best is None:
+                return False
+            _, trade_id, jtype = best
+
+        flow = "entry_journal" if jtype == "entry" else "exit_journal"
+        self.states[telegram_id] = {"flow": flow, "step": 0, "trade_id": trade_id, "data": {}}
+        if jtype == "entry":
+            await self._entry_journal_step(telegram_id, text)
+        else:
+            await self._exit_journal_step(telegram_id, text)
+        return True
 
     async def _start_journal_fsm(self, telegram_id: int, trade) -> None:
         """Begin entry or exit journal FSM depending on what's missing."""

@@ -130,6 +130,15 @@ async def generate_review(context: str, ai_config: dict) -> str:
         if provider == "claude":
             return await _generate_claude(context, ai_config)
         return await _generate_openai(context, ai_config)
+    except ModuleNotFoundError as exc:
+        pkg = "anthropic" if provider == "claude" else "openai"
+        log.error("AI coach package missing (%s): %s", pkg, exc)
+        return (
+            f"⚠️ The AI coach can't run — the <b>{pkg}</b> package isn't installed "
+            f"in the Python running this service.\n"
+            f"Fix: <code>pip install {pkg}</code> (in the same interpreter that "
+            f"runs the service), then restart."
+        )
     except Exception as exc:  # noqa: BLE001
         log.error("%s coach call failed: %s", provider, exc)
         return (
