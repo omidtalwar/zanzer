@@ -28,3 +28,7 @@ alembic>=1.13           # database migrations (production)
 # Python version, use Python 3.12. Version pin left loose to grab whatever
 # wheel exists for the interpreter in use.
 MetaTrader5
+
+# --- Phase 6: AI Performance Coach (Hermes) + analytics charts ---
+openai>=1.0              # AI coach; uses OPENAI_API_KEY. cp314 wheel available.
+matplotlib>=3.10         # equity/drawdown/emotion charts for /monthly (ships cp314 wheels)

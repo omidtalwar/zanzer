@@ -21,6 +21,7 @@ from backend.db.session import SessionLocal
 from backend.logging_config import get_logger
 from backend.services.analytics_service import compute_metrics, fmt_pf, fmt_rr
 from backend.services.psychology_service import score_emoji, score_label
+from backend.services import hermes_service
 
 log = get_logger("bot")
 
@@ -45,7 +46,9 @@ HELP = (
     "/today — today's trades, P&amp;L &amp; emotion score\n"
     "/yesterday — yesterday's trade performance &amp; sessions\n"
     "/weekly [7|30] — weekly performance report\n"
+    "/monthly — equity curve, drawdown &amp; emotion charts 📈\n"
     "/performance — all-time stats\n"
+    "/coach — AI performance &amp; psychology review 🤖\n"
     "/trades — your recent trade history\n"
     "/journal — view unjournaled trades &amp; recent journals\n"
     "/journal &lt;id&gt; — fill in the journal for a specific trade\n"
@@ -121,8 +124,14 @@ class BotDispatcher:
 
     # ------------------------------------------------------------------ entry
     async def handle(self, *, telegram_id: int, username: str | None,
-                     text: str | None, message_id: int | None = None) -> None:
+                     text: str | None, message_id: int | None = None,
+                     photo_file_id: str | None = None) -> None:
         text = (text or "").strip()
+
+        # A photo → attach it as a trade screenshot (unless it carries a command).
+        if photo_file_id and not text.startswith("/"):
+            await self._handle_photo(telegram_id, photo_file_id, text)
+            return
 
         # Mid-conversation input (not a command) → feed the active flow.
         state = self.states.get(telegram_id)
@@ -156,6 +165,7 @@ class BotDispatcher:
             "today": self._today, "yesterday": self._yesterday,
             "weekly": self._weekly, "performance": self._performance,
             "trades": self._trades, "journal": self._journal, "explain": self._explain,
+            "coach": self._coach, "monthly": self._monthly,
             "link": self._link_start, "risk": self._risk, "setrisk": self._setrisk,
             "lock": self._lock, "unlock": self._unlock, "subscribe": self._subscribe,
             "paid": self._paid, "stars": self._stars,
@@ -558,6 +568,143 @@ class BotDispatcher:
         ]
         await self.send(telegram_id, "\n".join(lines))
 
+    # ----------------------------------------------------------------- /coach
+    async def _coach(self, telegram_id, username, arg) -> None:
+        """AI performance & psychology review of the last N days (default 7)."""
+        if not settings.ai_coach_available:
+            await self.send(
+                telegram_id,
+                "🤖 <b>AI Coach</b>\n\n"
+                "The AI coach isn't enabled yet. An admin needs to set "
+                "<code>OPENAI_API_KEY</code> to turn it on.",
+            )
+            return
+
+        days = 30 if arg.strip() in ("30", "month") else 7
+        from datetime import timedelta
+        until = datetime.now(tz=timezone.utc)
+        since = until.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days - 1)
+
+        async with self._sf() as session:
+            user = await repo.get_user(session, telegram_id)
+            if user is None:
+                await self.send(telegram_id, "Send /start first.")
+                return
+            trades = await repo.get_trades_in_range(session, user.id, since=since, until=until)
+            journals = await repo.get_journals_in_range(session, user.id, since=since, until=until)
+            since_str = since.strftime("%Y-%m-%d")
+            until_str = until.strftime("%Y-%m-%d")
+            emotion_rows = await repo.get_emotion_scores_in_range(
+                session, user.id, since_str, until_str
+            )
+
+        metrics = compute_metrics(_trades_to_dicts(trades))
+        if metrics is None and not journals:
+            await self.send(
+                telegram_id,
+                "🤖 <b>AI Coach</b>\n\nI don't have enough trades or journals yet "
+                "to coach you. Keep trading and journaling, then try again.",
+            )
+            return
+
+        await self.send(telegram_id, "🤖 <i>Analysing your trades, journals &amp; psychology…</i>")
+
+        journal_dicts = [
+            {
+                "type": j.type, "plan_followed": j.plan_followed or j.plan_followed_exit,
+                "emotion_entry": j.emotion_entry, "emotion_exit": j.emotion_exit,
+                "mistakes": j.mistakes, "rating": j.rating,
+                "setup_reason": j.setup_reason, "skipped": j.skipped,
+            }
+            for j in journals
+        ]
+        emotion_dicts = [{"date": e.date, "score": e.score} for e in emotion_rows]
+
+        context = hermes_service.build_review_context(
+            metrics=metrics, journals=journal_dicts,
+            emotion_scores=emotion_dicts,
+            period_label=f"Last {days} days ({since_str} → {until_str})",
+        )
+        review = await hermes_service.generate_review(context)
+
+        await self.send(
+            telegram_id,
+            f"🤖 <b>Hermes — Your {days}-day Coaching Review</b>\n\n{_esc(review)}\n\n"
+            "<i>This is reflection on your past behaviour, not financial advice. "
+            "I never tell you what to trade.</i>",
+        )
+
+    # ---------------------------------------------------------------- /monthly
+    async def _monthly(self, telegram_id, username, arg) -> None:
+        """Equity curve, drawdown and emotion-score-trend charts (last 30 days)."""
+        from datetime import timedelta
+        until = datetime.now(tz=timezone.utc)
+        since = until.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=29)
+
+        async with self._sf() as session:
+            user = await repo.get_user(session, telegram_id)
+            if user is None:
+                await self.send(telegram_id, "Send /start first.")
+                return
+            trades = await repo.get_trades_in_range(session, user.id, since=since, until=until)
+            snap = await repo.get_snapshot(session, user.id)
+            since_str = since.strftime("%Y-%m-%d")
+            until_str = until.strftime("%Y-%m-%d")
+            emotion_rows = await repo.get_emotion_scores_in_range(
+                session, user.id, since_str, until_str
+            )
+
+        closed = [t for t in trades if t.profit is not None and t.closed_at is not None]
+        closed.sort(key=lambda t: t.closed_at)
+
+        if not closed and not emotion_rows:
+            await self.send(
+                telegram_id,
+                "📈 <b>Monthly Charts</b>\n\n<i>No trades or emotion data in the "
+                "last 30 days yet.</i>",
+            )
+            return
+
+        await self.send(telegram_id, "📈 <i>Generating your monthly charts…</i>")
+
+        # Build cumulative-PnL equity points.
+        from backend.bot import client as bot_client
+        from backend.services import charts_service
+
+        cum = 0.0
+        points: list[tuple[object, float]] = []
+        for t in closed:
+            cum = round(cum + t.profit, 2)
+            points.append((t.closed_at, cum))
+
+        # Starting balance ≈ current balance minus the period's net P&L.
+        currency = snap.currency if snap else ""
+        end_balance = snap.balance if snap else (cum if cum else 0.0)
+        starting_balance = round(end_balance - cum, 2) if snap else 1000.0
+
+        try:
+            if points:
+                eq = charts_service.equity_curve_png(points, starting_balance, currency)
+                await bot_client.send_photo(
+                    telegram_id, eq,
+                    caption=f"📈 <b>Equity Curve</b> — {since_str} → {until_str}",
+                )
+                dd = charts_service.drawdown_png(points, starting_balance)
+                await bot_client.send_photo(telegram_id, dd, caption="📉 <b>Drawdown (%)</b>")
+
+            if emotion_rows:
+                rows = sorted(emotion_rows, key=lambda e: e.date)
+                em = charts_service.emotion_trend_png(
+                    [e.date[5:] for e in rows], [e.score for e in rows]
+                )
+                await bot_client.send_photo(telegram_id, em, caption="🧠 <b>Emotion Score Trend</b>")
+        except Exception as exc:  # noqa: BLE001
+            log.error("chart generation failed for %s: %s", telegram_id, exc)
+            await self.send(telegram_id, "⚠️ Couldn't generate charts right now. Try again later.")
+            return
+
+        await self.send(telegram_id, "✅ Monthly charts above. /coach for an AI review.")
+
     # ---------------------------------------------------------------- /trades
     async def _trades(self, telegram_id, username, arg) -> None:
         async with self._sf() as session:
@@ -595,13 +742,21 @@ class BotDispatcher:
             if user is None:
                 await self.send(telegram_id, "Send /start first.")
                 return
-            # /journal <id> → start FSM for that trade
+            # /journal <id> → start FSM if it needs journaling, else show it.
             if arg.strip().isdigit():
                 trade = await repo.get_trade_by_id(session, int(arg.strip()))
                 if trade is None or trade.user_id != user.id:
                     await self.send(telegram_id, "Trade not found.")
                     return
-                await self._start_journal_fsm(telegram_id, trade)
+                needs_entry = trade.entry_journal_id is None
+                needs_exit = (
+                    trade.status in ("closed", "entry_skipped", "exit_skipped")
+                    and trade.exit_journal_id is None
+                )
+                if needs_entry or needs_exit:
+                    await self._start_journal_fsm(telegram_id, trade)
+                else:
+                    await self._show_trade_journal(session, telegram_id, trade)
                 return
             # /journal → show unjournaled + summary
             unjournaled = await repo.get_unjournaled_trades(session, user.id)
@@ -637,6 +792,97 @@ class BotDispatcher:
                     f"{status_icon} #{t.id} {_esc(t.symbol)} {_esc(t.direction)} {_esc(profit_str)}"
                 )
         await self.send(telegram_id, "\n".join(lines))
+
+    async def _show_trade_journal(self, session, telegram_id: int, trade) -> None:
+        """Display a fully-journaled trade's notes + screenshot."""
+        entry = await repo.get_journal_for_trade(session, trade.id, "entry")
+        exit_j = await repo.get_journal_for_trade(session, trade.id, "exit")
+        profit_str = f"{trade.profit:+.2f}" if trade.profit is not None else "open"
+        dur = _fmt_duration(trade.duration_s)
+        lines = [
+            f"📓 <b>Trade #{trade.id} — {_esc(trade.symbol)} {_esc(trade.direction)}</b>",
+            f"P&amp;L: <b>{_esc(profit_str)}</b> | Duration: {dur}",
+            "",
+        ]
+        if entry and not entry.skipped:
+            lines += [
+                "<b>Entry</b>",
+                f"• Setup: <i>{_esc(entry.setup_reason or '—')}</i>",
+                f"• Emotion: {_esc(entry.emotion_entry or '—')} | "
+                f"Plan: {_esc(entry.plan_followed or '—')} | "
+                f"Confidence: {entry.confidence or '—'}/10",
+                "",
+            ]
+        elif entry and entry.skipped:
+            lines.append("<b>Entry</b>: ⚠️ skipped\n")
+        if exit_j and not exit_j.skipped:
+            lines += [
+                "<b>Exit</b>",
+                f"• Reason: {_esc(exit_j.exit_reason or '—')} | "
+                f"Plan: {_esc(exit_j.plan_followed_exit or '—')}",
+                f"• Mistakes: <i>{_esc(exit_j.mistakes or 'none')}</i>",
+                f"• Emotion: {_esc(exit_j.emotion_exit or '—')} | "
+                f"Rating: {'⭐' * (exit_j.rating or 0) or '—'}",
+            ]
+        elif exit_j and exit_j.skipped:
+            lines.append("<b>Exit</b>: ⚠️ skipped")
+
+        # Send the screenshot (if any) with the journal text as caption.
+        if trade.screenshot_file_id:
+            from backend.bot import client as bot_client
+            ok = await bot_client.send_photo_by_id(
+                telegram_id, trade.screenshot_file_id, caption="\n".join(lines)
+            )
+            if ok:
+                return  # photo sent with the journal as caption
+        await self.send(telegram_id, "\n".join(lines))
+
+    # ------------------------------------------------------- screenshot attach
+    async def _handle_photo(self, telegram_id: int, file_id: str, caption: str) -> None:
+        """Attach a sent photo to a trade as its chart screenshot.
+
+        Target: the trade id in the caption if given, else the active journal
+        flow's trade, else the most recent trade without a screenshot.
+        """
+        async with self._sf() as session:
+            user = await repo.get_user(session, telegram_id)
+            if user is None:
+                await self.send(telegram_id, "Send /start first.")
+                return
+
+            target = None
+            # 1) explicit trade id in caption (a bare number).
+            cap = caption.strip()
+            if cap.isdigit():
+                t = await repo.get_trade_by_id(session, int(cap))
+                if t and t.user_id == user.id:
+                    target = t
+            # 2) active journal flow.
+            if target is None:
+                state = self.states.get(telegram_id)
+                if state and state.get("flow") in ("entry_journal", "exit_journal"):
+                    target = await repo.get_trade_by_id(session, state["trade_id"])
+            # 3) most recent trade without a screenshot.
+            if target is None:
+                target = await repo.get_latest_trade_without_screenshot(session, user.id)
+
+            if target is None:
+                await self.send(
+                    telegram_id,
+                    "📷 I got your photo, but there's no trade to attach it to.\n"
+                    "Send a photo with the trade number as the caption "
+                    "(e.g. caption <b>12</b>), or use /trades to find the id.",
+                )
+                return
+
+            await repo.set_trade_screenshot(session, target, file_id)
+            symbol, direction, tid = target.symbol, target.direction, target.id
+
+        await self.send(
+            telegram_id,
+            f"📷 Screenshot attached to trade <b>#{tid}</b> "
+            f"({_esc(symbol)} {_esc(direction)}). View it anytime with /journal {tid}.",
+        )
 
     async def _start_journal_fsm(self, telegram_id: int, trade) -> None:
         """Begin entry or exit journal FSM depending on what's missing."""
@@ -881,7 +1127,8 @@ class BotDispatcher:
                 f"Exit: {_esc(data['exit_reason'])} | Plan: {_esc(data['plan_followed'])} "
                 f"| Emotion: {_esc(data['emotion'])}\n\n"
                 + "\n".join(feedback) +
-                "\n\n<i>Use /journal to see all your trades.</i>",
+                f"\n\n📷 <i>Send a chart screenshot now to attach it to trade "
+                f"#{state['trade_id']}.</i>\n<i>Use /journal to see all your trades.</i>",
             )
 
     async def _risk(self, telegram_id, username, arg) -> None:

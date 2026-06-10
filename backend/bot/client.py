@@ -49,6 +49,51 @@ async def send_message(chat_id: int | str, text: str, parse_mode: str = "HTML") 
     return True
 
 
+async def send_photo(chat_id: int | str, photo: bytes, caption: str | None = None,
+                     filename: str = "chart.png", parse_mode: str = "HTML") -> bool:
+    """Upload a PNG (bytes) to the chat. Used for analytics charts."""
+    data = {"chat_id": str(chat_id)}
+    if caption:
+        data["caption"] = caption
+        data["parse_mode"] = parse_mode
+    files = {"photo": (filename, photo, "image/png")}
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(f"{_base()}/sendPhoto", data=data, files=files)
+        if resp.status_code != 200:
+            log.error("sendPhoto failed [%s]: %s", resp.status_code, resp.text)
+            return False
+        return True
+    except httpx.HTTPError as exc:
+        log.error("sendPhoto error: %s", exc)
+        return False
+
+
+async def send_photo_by_id(chat_id: int | str, file_id: str, caption: str | None = None,
+                           parse_mode: str = "HTML") -> bool:
+    """Re-send an already-uploaded photo by its Telegram file_id (no re-upload)."""
+    body = {"chat_id": chat_id, "photo": file_id}
+    if caption:
+        body["caption"] = caption
+        body["parse_mode"] = parse_mode
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(f"{_base()}/sendPhoto", json=body)
+        return resp.status_code == 200
+    except httpx.HTTPError:
+        return False
+
+
+async def get_file_path(file_id: str) -> str | None:
+    """Resolve a Telegram file_id to a downloadable file path (for screenshots)."""
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(f"{_base()}/getFile", params={"file_id": file_id})
+    data = resp.json()
+    if data.get("ok"):
+        return data["result"].get("file_path")
+    return None
+
+
 async def send_invoice(chat_id: int | str, title: str, description: str, payload: str,
                        prices: list[dict], currency: str = "XTR",
                        provider_token: str = "") -> bool:

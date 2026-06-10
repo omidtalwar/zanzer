@@ -77,10 +77,18 @@ async def run() -> None:
             username = frm.get("username")
             text = message.get("text", "")
             message_id = message.get("message_id")
+            # Photo: Telegram sends multiple sizes; the last is the largest.
+            photo_file_id = None
+            if message.get("photo"):
+                photo_file_id = message["photo"][-1].get("file_id")
+                # A photo can carry a caption (used as the command/text).
+                if not text:
+                    text = message.get("caption", "")
             try:
                 await dispatcher.handle(
                     telegram_id=telegram_id, username=username,
                     text=text, message_id=message_id,
+                    photo_file_id=photo_file_id,
                 )
             except Exception as exc:  # noqa: BLE001 - one bad update shouldn't kill the bot
                 log.error("handler error for %s: %s", telegram_id, exc)

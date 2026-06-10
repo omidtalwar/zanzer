@@ -567,6 +567,29 @@ async def get_trade_by_id(session: AsyncSession, trade_id: int) -> Trade | None:
     return result.scalar_one_or_none()
 
 
+async def set_trade_screenshot(
+    session: AsyncSession, trade: Trade, file_id: str
+) -> Trade:
+    trade.screenshot_file_id = file_id
+    await session.commit()
+    await session.refresh(trade)
+    return trade
+
+
+async def get_latest_trade_without_screenshot(
+    session: AsyncSession, user_id: int
+) -> Trade | None:
+    """Most recent trade (any status) with no screenshot — the default target
+    when a trader sends a photo without specifying a trade id."""
+    result = await session.execute(
+        select(Trade).where(
+            Trade.user_id == user_id,
+            Trade.screenshot_file_id.is_(None),
+        ).order_by(Trade.opened_at.desc()).limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
 async def get_journal_for_trade(
     session: AsyncSession, trade_id: int, type: str
 ) -> TradeJournal | None:
@@ -611,6 +634,20 @@ async def get_trades_in_range(
             Trade.opened_at >= since,
             Trade.opened_at <= until,
         ).order_by(Trade.opened_at.desc())
+    )
+    return list(result.scalars().all())
+
+
+async def get_journals_in_range(
+    session: AsyncSession, user_id: int,
+    since: "datetime", until: "datetime",
+) -> list[TradeJournal]:
+    result = await session.execute(
+        select(TradeJournal).where(
+            TradeJournal.user_id == user_id,
+            TradeJournal.created_at >= since,
+            TradeJournal.created_at <= until,
+        ).order_by(TradeJournal.created_at)
     )
     return list(result.scalars().all())
 

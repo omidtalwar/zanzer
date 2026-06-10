@@ -50,6 +50,7 @@ _SQLITE_COLUMN_ADDS = [
     ("risk_settings", "max_daily_loss_usd", "ALTER TABLE risk_settings ADD COLUMN max_daily_loss_usd FLOAT DEFAULT 0.0"),
     ("account_snapshots", "yesterday_json", "ALTER TABLE account_snapshots ADD COLUMN yesterday_json TEXT"),
     ("locks", "explanation", "ALTER TABLE locks ADD COLUMN explanation TEXT"),
+    ("trades", "screenshot_file_id", "ALTER TABLE trades ADD COLUMN screenshot_file_id VARCHAR(256)"),
     # V3/V4 — emotion_scores and trade journal tables created by create_all on first run.
 ]
 

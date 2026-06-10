@@ -207,6 +207,8 @@ class Trade(Base):
     exit_reminder_count: Mapped[int] = mapped_column(Integer, default=0)
     # open | closed | entry_skipped | exit_skipped
     status: Mapped[str] = mapped_column(String(24), default="open")
+    # Telegram file_id of a chart screenshot the trader attached (optional).
+    screenshot_file_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
