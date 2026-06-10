@@ -129,6 +129,8 @@ class AccountWorker:
         self._last_loss_closed_at: datetime | None = None
         # Track the newest position opened this cycle for revenge detection.
         self._new_position_opened_at: datetime | None = None
+        # Dedup for anonymized channel events: (date, kind) already posted.
+        self._channel_posted: set[tuple[str, str]] = set()
 
     # Reminder windows: send a reminder after these many minutes without a journal response.
     _REMINDER_MINUTES = [5, 15, 30]
@@ -136,6 +138,19 @@ class AccountWorker:
 
     async def _notify_user(self, text: str) -> bool:
         return await bot_client.send_message(self.telegram_id, text)
+
+    async def _post_channel_event(self, kind: str) -> None:
+        """Post an anonymized enforcement event to the marketing channel, once
+        per day per kind (so the 30s cycle doesn't spam)."""
+        key = (datetime.now(tz=timezone.utc).strftime("%Y-%m-%d"), kind)
+        if key in self._channel_posted:
+            return
+        self._channel_posted.add(key)
+        try:
+            from backend import channel
+            await channel.post_event(kind)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("channel event post failed (%s): %s", kind, exc)
 
     def _build_status(self) -> StatusResponse:
         account = self.broker.get_account_info()
@@ -342,6 +357,10 @@ class AccountWorker:
             locked_by_score=day.locked_by_score,
         )
 
+        # Anonymized channel event when a revenge trade is flagged.
+        if any("revenge" in e.reason.lower() for e in day.events):
+            await self._post_channel_event("revenge")
+
         # Auto-lock if score just dropped below threshold (once per day).
         if day.locked_by_score:
             lock_row = await repo.get_lock(session, self.user_id)
@@ -355,6 +374,7 @@ class AccountWorker:
                     session, self.user_id, "PSYCH_LOCK",
                     f"Score dropped to {day.score} on {server_date}",
                 )
+                await self._post_channel_event("lock_score")
                 emoji = score_emoji(day.score)
                 await self.notify(
                     f"{emoji} <b>Trading locked — emotion score too low</b>\n\n"
@@ -481,6 +501,12 @@ class AccountWorker:
         if action.type == "LOCK":
             await repo.set_lock(session, self.user_id, action.reason, daily=True)
             await repo.add_risk_event(session, self.user_id, "LOCK", action.reason)
+            r = action.reason.lower()
+            kind = ("lock_daily_loss" if "daily loss" in r
+                    else "lock_trade_limit" if "trade limit" in r
+                    else "lock_streak" if "consecutive" in r else None)
+            if kind:
+                await self._post_channel_event(kind)
             return action.model_copy(update={"executed": True, "detail": "trading locked (daily)"})
 
         if action.type == "CLOSE_ALL":

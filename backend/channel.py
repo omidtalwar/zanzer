@@ -51,6 +51,27 @@ def format_post(stats: dict) -> str:
     return "\n".join(lines)
 
 
+# Anonymized real-time enforcement events. No name, no $ amount — just the rule.
+_EVENT_TEXT = {
+    "lock_daily_loss": "🔒 A trader just hit their <b>daily loss limit</b> — ZanZer locked their account before it got worse. Discipline &gt; hope.",
+    "lock_trade_limit": "🛑 A trader reached their <b>daily trade limit</b>. No more trades today — overtrading stopped.",
+    "lock_streak": "🧊 A trader hit a <b>losing streak</b>. ZanZer enforced a cool-off lock to break the tilt.",
+    "lock_score": "🧠 A trader's <b>discipline score</b> dropped too low. Trading locked for the day to protect their capital.",
+    "revenge": "🚫 <b>Revenge trade</b> detected and flagged. ZanZer doesn't let one bad trade become five.",
+}
+
+
+async def post_event(kind: str) -> bool:
+    """Post an anonymized enforcement event to the channel (social proof)."""
+    if not settings.marketing_channel_id or not settings.channel_post_events:
+        return False
+    text = _EVENT_TEXT.get(kind)
+    if not text:
+        return False
+    text += "\n\n🛡️ Protect your account 👉 @Zanzerbot"
+    return await bot_client.send_message(settings.marketing_channel_id, text)
+
+
 async def build_post() -> str:
     async with SessionLocal() as session:
         stats = await repo.community_stats(session)

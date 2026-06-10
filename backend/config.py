@@ -124,6 +124,9 @@ class Settings(BaseSettings):
     marketing_channel_id: str | None = None
     # UTC hour (0–23) to post the daily community summary.
     channel_post_hour_utc: int = 21
+    # Post anonymized real-time enforcement events (locks, revenge flags) to the
+    # channel as social proof. Strictly anonymized — no name, no $ amount.
+    channel_post_events: bool = True
 
     # --- App ---
     app_env: str = "development"
