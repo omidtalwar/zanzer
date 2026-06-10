@@ -106,6 +106,8 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = None
     anthropic_model: str = "claude-sonnet-4-6"
     ai_coach_enabled: bool = True
+    # Max /coach calls per user per UTC day (cost protection). 0 = unlimited.
+    coach_daily_limit: int = 10
 
     # --- App ---
     app_env: str = "development"

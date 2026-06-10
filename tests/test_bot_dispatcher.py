@@ -389,6 +389,24 @@ async def test_worker_prompted_exit_journal_resumes_from_db():
         assert j.exit_reason == "manual" and j.rating == 4
 
 
+async def test_coach_daily_quota():
+    """Per-user /coach cap: allows up to the limit, then blocks until next day."""
+    Session = await _session_factory()
+    d, _, _ = _make_dispatcher(Session)
+    old = settings.coach_daily_limit
+    settings.coach_daily_limit = 3
+    try:
+        assert d._coach_quota_ok(1) is True   # 1
+        assert d._coach_quota_ok(1) is True   # 2
+        assert d._coach_quota_ok(1) is True   # 3
+        assert d._coach_quota_ok(1) is False  # 4 -> blocked
+        assert d._coach_quota_ok(2) is True   # different user unaffected
+        settings.coach_daily_limit = 0        # 0 = unlimited
+        assert d._coach_quota_ok(1) is True
+    finally:
+        settings.coach_daily_limit = old
+
+
 async def _run():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

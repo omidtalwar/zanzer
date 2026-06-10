@@ -166,6 +166,22 @@ class BotDispatcher:
         self.answer_cbq = answer_cbq  # async (callback_query_id) -> bool
         self._sf = session_factory
         self.states: dict[int, dict] = {}
+        # /coach cost guard: telegram_id -> (utc_date_str, count_today)
+        self._coach_usage: dict[int, tuple[str, int]] = {}
+
+    def _coach_quota_ok(self, telegram_id: int) -> bool:
+        """Per-user daily cap on /coach (0 = unlimited). Increments on success."""
+        limit = settings.coach_daily_limit
+        if not limit or limit <= 0:
+            return True
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        day, count = self._coach_usage.get(telegram_id, (today, 0))
+        if day != today:
+            count = 0
+        if count >= limit:
+            return False
+        self._coach_usage[telegram_id] = (today, count + 1)
+        return True
 
     # ------------------------------------------------------------------ entry
     async def handle(self, *, telegram_id: int, username: str | None,
@@ -687,6 +703,16 @@ class BotDispatcher:
                 )
                 return
             trades = await repo.get_trades_in_range(session, user.id, since=since, until=until)
+        # Cost guard: cap /coach per user per day (checked after we know it's enabled).
+        if not self._coach_quota_ok(telegram_id):
+            await self.send(
+                telegram_id,
+                f"🤖 You've reached today's coaching limit "
+                f"({settings.coach_daily_limit}/day). Try again tomorrow — "
+                f"your review reflects the same data until new trades close.",
+            )
+            return
+        async with self._sf() as session:
             journals = await repo.get_journals_in_range(session, user.id, since=since, until=until)
             since_str = since.strftime("%Y-%m-%d")
             until_str = until.strftime("%Y-%m-%d")
