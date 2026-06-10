@@ -171,3 +171,67 @@ class Payment(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     user: Mapped["User"] = relationship(back_populates="payments")
+
+
+class Trade(Base):
+    """One row per MT5 position — written by the worker when a position opens/closes.
+
+    The worker compares open positions each cycle to detect new entries and exits,
+    then triggers the journal FSM in the bot.
+    """
+    __tablename__ = "trades"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    # MT5 position ticket — unique per user.
+    ticket: Mapped[int] = mapped_column(Integer, index=True)
+    symbol: Mapped[str] = mapped_column(String(32))
+    direction: Mapped[str] = mapped_column(String(8))     # BUY | SELL
+    volume: Mapped[float] = mapped_column(Float)
+    entry_price: Mapped[float] = mapped_column(Float)
+    exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    tp: Mapped[float | None] = mapped_column(Float, nullable=True)
+    profit: Mapped[float | None] = mapped_column(Float, nullable=True)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_s: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Journal linkage.
+    entry_journal_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    exit_journal_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    entry_prompted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    exit_prompted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    entry_reminder_count: Mapped[int] = mapped_column(Integer, default=0)
+    exit_reminder_count: Mapped[int] = mapped_column(Integer, default=0)
+    # open | closed | entry_skipped | exit_skipped
+    status: Mapped[str] = mapped_column(String(24), default="open")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class TradeJournal(Base):
+    """One journal entry per trade per phase (entry or exit).
+
+    The bot FSM writes this after the trader answers all questions.
+    """
+    __tablename__ = "trade_journals"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    trade_id: Mapped[int] = mapped_column(ForeignKey("trades.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    type: Mapped[str] = mapped_column(String(8))          # entry | exit
+
+    # Entry journal fields.
+    setup_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    emotion_entry: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    plan_followed: Mapped[str | None] = mapped_column(String(16), nullable=True)  # yes | mostly | no
+    confidence: Mapped[int | None] = mapped_column(Integer, nullable=True)        # 1–10
+
+    # Exit journal fields.
+    exit_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)   # tp | sl | manual | partial
+    plan_followed_exit: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    mistakes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    emotion_exit: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    rating: Mapped[int | None] = mapped_column(Integer, nullable=True)            # 1–5
+
+    skipped: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

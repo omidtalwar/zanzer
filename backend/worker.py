@@ -117,6 +117,12 @@ class AccountWorker:
         self.notify = notify or self._notify_user
         self._session_factory = session_factory
         self._alerted: set[tuple[str, str]] = set()  # (date, reason) dedup
+        # Ticket set from the previous cycle — used to detect opens/closes.
+        self._prev_tickets: set[int] = set()
+
+    # Reminder windows: send a reminder after these many minutes without a journal response.
+    _REMINDER_MINUTES = [5, 15, 30]
+    _MAX_REMINDERS = len(_REMINDER_MINUTES)  # after this → mark skipped
 
     async def _notify_user(self, text: str) -> bool:
         return await bot_client.send_message(self.telegram_id, text)
@@ -144,6 +150,142 @@ class AccountWorker:
         async with self._session_factory() as session:
             acct = await repo.get_account_by_id(session, self.account_id)
             return acct.status if acct else None
+
+    # --------------------------------------------------------- journal helpers
+    def _entry_prompt(self, pos) -> str:
+        direction = pos.direction if hasattr(pos, "direction") else "?"
+        symbol = pos.symbol if hasattr(pos, "symbol") else "?"
+        volume = pos.volume if hasattr(pos, "volume") else "?"
+        price = pos.price_open if hasattr(pos, "price_open") else "?"
+        return (
+            f"🔔 <b>New trade detected</b>\n"
+            f"<b>{symbol}</b> {direction} {volume} lots @ {price}\n\n"
+            f"📝 <b>Entry Journal (1/4)</b>\n"
+            f"What's your setup / reason for this trade?\n"
+            f"<i>(e.g. London breakout, support bounce, trend continuation)</i>"
+        )
+
+    def _exit_prompt(self, trade, pos_data: dict) -> str:
+        profit = pos_data.get("profit", 0.0)
+        dur = _fmt_duration(pos_data.get("duration_s"))
+        emoji = "✅" if profit >= 0 else "❌"
+        return (
+            f"{emoji} <b>Trade closed</b>\n"
+            f"<b>{trade.symbol}</b> {trade.direction} | "
+            f"P&L: <b>{profit:+.2f}</b> | Duration: {dur}\n\n"
+            f"📝 <b>Exit Journal (1/5)</b>\n"
+            f"Why did you exit?\n"
+            f"Reply: <b>tp</b> · <b>sl</b> · <b>manual</b> · <b>partial</b>"
+        )
+
+    async def _handle_new_positions(self, session, current_positions) -> None:
+        """Detect positions that weren't open last cycle → open_trade + entry prompt."""
+        current_tickets = {p.ticket for p in current_positions}
+        new_tickets = current_tickets - self._prev_tickets
+
+        for pos in current_positions:
+            if pos.ticket not in new_tickets:
+                continue
+            existing = await repo.get_trade_by_ticket(session, self.user_id, pos.ticket)
+            if existing is not None:
+                continue  # already recorded (e.g. worker restarted)
+            trade = await repo.open_trade(
+                session, self.user_id,
+                ticket=pos.ticket, symbol=pos.symbol, direction=pos.direction,
+                volume=pos.volume, entry_price=pos.price_open,
+                sl=pos.sl if pos.sl else None,
+                tp=pos.tp if pos.tp else None,
+                opened_at=pos.time,
+            )
+            await self.notify(self._entry_prompt(pos))
+            log.info("journal: new trade %s (ticket=%s)", trade.id, pos.ticket)
+
+    async def _handle_closed_positions(self, session, current_positions) -> None:
+        """Detect positions that closed since last cycle → close_trade + exit prompt."""
+        current_tickets = {p.ticket for p in current_positions}
+        closed_tickets = self._prev_tickets - current_tickets
+        if not closed_tickets:
+            return
+
+        # Pull from MT5 history to get exit price + profit.
+        today_deals = self.broker.get_today_deals()
+        deal_by_pos: dict[int, object] = {}
+        for d in today_deals:
+            if d.entry in ("OUT", "INOUT") and d.position_id not in deal_by_pos:
+                deal_by_pos[d.position_id] = d
+
+        for ticket in closed_tickets:
+            trade = await repo.get_trade_by_ticket(session, self.user_id, ticket)
+            if trade is None or trade.status not in ("open", "entry_skipped"):
+                continue
+            deal = deal_by_pos.get(ticket)
+            exit_price = deal.price if deal else trade.entry_price
+            profit = deal.profit if deal else 0.0
+            closed_at = deal.time if deal else datetime.now(tz=timezone.utc)
+            trade = await repo.close_trade(
+                session, trade,
+                exit_price=exit_price, profit=profit, closed_at=closed_at,
+            )
+            pos_data = {
+                "profit": profit,
+                "duration_s": trade.duration_s,
+            }
+            await self.notify(self._exit_prompt(trade, pos_data))
+            log.info("journal: closed trade %s (ticket=%s) P&L=%s", trade.id, ticket, profit)
+
+    async def _process_journal_reminders(self, session) -> None:
+        """Re-prompt or skip unjournaled trades based on time elapsed."""
+        unjournaled = await repo.get_unjournaled_trades(session, self.user_id)
+        now = datetime.now(tz=timezone.utc)
+
+        for trade in unjournaled:
+            # --- entry journal reminder ---
+            if trade.entry_journal_id is None and trade.entry_prompted_at:
+                prompted = trade.entry_prompted_at
+                if prompted.tzinfo is None:
+                    prompted = prompted.replace(tzinfo=timezone.utc)
+                elapsed_m = (now - prompted).total_seconds() / 60
+                count = trade.entry_reminder_count
+
+                if count >= self._MAX_REMINDERS:
+                    # Out of reminders → skip and penalise.
+                    await repo.skip_entry_journal(session, trade)
+                    await self.notify(
+                        f"⚠️ Entry journal for <b>{trade.symbol}</b> was skipped "
+                        f"(no response after {self._MAX_REMINDERS} reminders). "
+                        f"Emotion score −10. Use /journal to add notes later."
+                    )
+                elif count < len(self._REMINDER_MINUTES) and elapsed_m >= self._REMINDER_MINUTES[count]:
+                    await repo.bump_entry_reminder(session, trade)
+                    await self.notify(
+                        f"📝 Reminder #{count + 1}: still waiting for your <b>entry journal</b> "
+                        f"on {trade.symbol} {trade.direction}.\n"
+                        f"Reply with your setup reason or use /journal {trade.id} to fill it in."
+                    )
+
+            # --- exit journal reminder ---
+            if (trade.status in ("closed", "entry_skipped")
+                    and trade.exit_journal_id is None and trade.exit_prompted_at):
+                prompted = trade.exit_prompted_at
+                if prompted.tzinfo is None:
+                    prompted = prompted.replace(tzinfo=timezone.utc)
+                elapsed_m = (now - prompted).total_seconds() / 60
+                count = trade.exit_reminder_count
+
+                if count >= self._MAX_REMINDERS:
+                    await repo.skip_exit_journal(session, trade)
+                    await self.notify(
+                        f"⚠️ Exit journal for <b>{trade.symbol}</b> was skipped. "
+                        f"Emotion score −10. Use /journal to add notes later."
+                    )
+                elif count < len(self._REMINDER_MINUTES) and elapsed_m >= self._REMINDER_MINUTES[count]:
+                    await repo.bump_exit_reminder(session, trade)
+                    pos_data = {"profit": trade.profit or 0.0, "duration_s": trade.duration_s}
+                    await self.notify(
+                        f"📝 Reminder #{count + 1}: still waiting for your <b>exit journal</b> "
+                        f"on {trade.symbol} {trade.direction}.\n"
+                        + self._exit_prompt(trade, pos_data)
+                    )
 
     async def _refresh_limits(self) -> None:
         """Reload this user's risk settings so rule changes apply without a
@@ -186,6 +328,17 @@ class AccountWorker:
         # Persist the latest live data so the bot's /status can show it.
         async with self._session_factory() as session:
             await repo.upsert_snapshot(session, self.user_id, status, yesterday_json=yesterday_json)
+
+        # V3 — journal: detect new opens, detect closes, send reminders.
+        try:
+            async with self._session_factory() as session:
+                await self._handle_new_positions(session, status.open_positions)
+                await self._handle_closed_positions(session, status.open_positions)
+                await self._process_journal_reminders(session)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("journal cycle error for user %s: %s", self.user_id, exc)
+        finally:
+            self._prev_tickets = {p.ticket for p in status.open_positions}
 
         # Successful read → the account is live/monitored.
         if self.account_id is not None:

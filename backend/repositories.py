@@ -21,6 +21,8 @@ from backend.db.models import (
     RiskEvent,
     RiskSettings,
     Subscription,
+    Trade,
+    TradeJournal,
     User,
 )
 from backend.security import encrypt
@@ -385,5 +387,192 @@ async def upsert_snapshot(
 async def get_snapshot(session: AsyncSession, user_id: int) -> AccountSnapshot | None:
     result = await session.execute(
         select(AccountSnapshot).where(AccountSnapshot.user_id == user_id)
+    )
+    return result.scalar_one_or_none()
+
+
+# ---------------------------------------------------------------------------
+# V3 — Trade Journal repositories
+# ---------------------------------------------------------------------------
+
+async def get_trade_by_ticket(
+    session: AsyncSession, user_id: int, ticket: int
+) -> Trade | None:
+    result = await session.execute(
+        select(Trade).where(Trade.user_id == user_id, Trade.ticket == ticket)
+    )
+    return result.scalar_one_or_none()
+
+
+async def open_trade(
+    session: AsyncSession, user_id: int, *,
+    ticket: int, symbol: str, direction: str, volume: float,
+    entry_price: float, sl: float | None, tp: float | None, opened_at: datetime,
+) -> Trade:
+    trade = Trade(
+        user_id=user_id, ticket=ticket, symbol=symbol,
+        direction=direction, volume=volume, entry_price=entry_price,
+        sl=sl, tp=tp, opened_at=opened_at, status="open",
+        entry_prompted_at=_utcnow(),
+    )
+    session.add(trade)
+    await session.commit()
+    await session.refresh(trade)
+    return trade
+
+
+async def close_trade(
+    session: AsyncSession, trade: Trade, *,
+    exit_price: float, profit: float, closed_at: datetime,
+) -> Trade:
+    trade.exit_price = exit_price
+    trade.profit = profit
+    trade.closed_at = closed_at
+    trade.status = "closed"
+    trade.exit_prompted_at = _utcnow()
+    if trade.opened_at:
+        opened = trade.opened_at
+        if opened.tzinfo is None:
+            opened = opened.replace(tzinfo=timezone.utc)
+        trade.duration_s = int((closed_at - opened).total_seconds())
+    await session.commit()
+    await session.refresh(trade)
+    return trade
+
+
+async def get_open_trades(session: AsyncSession, user_id: int) -> list[Trade]:
+    result = await session.execute(
+        select(Trade).where(Trade.user_id == user_id, Trade.status == "open")
+        .order_by(Trade.opened_at.desc())
+    )
+    return list(result.scalars().all())
+
+
+async def get_unjournaled_trades(session: AsyncSession, user_id: int) -> list[Trade]:
+    """Trades that need an entry or exit journal (entry_journal_id or exit_journal_id is null
+    and the trade is past its prompt time)."""
+    result = await session.execute(
+        select(Trade).where(
+            Trade.user_id == user_id,
+            Trade.status.in_(["open", "closed"]),
+        ).order_by(Trade.opened_at.desc())
+    )
+    trades = list(result.scalars().all())
+    unjournaled = []
+    for t in trades:
+        needs_entry = t.entry_journal_id is None and t.entry_prompted_at is not None
+        needs_exit = (
+            t.status == "closed"
+            and t.exit_journal_id is None
+            and t.exit_prompted_at is not None
+        )
+        if needs_entry or needs_exit:
+            unjournaled.append(t)
+    return unjournaled
+
+
+async def bump_entry_reminder(session: AsyncSession, trade: Trade) -> Trade:
+    trade.entry_reminder_count += 1
+    trade.entry_prompted_at = _utcnow()
+    await session.commit()
+    await session.refresh(trade)
+    return trade
+
+
+async def bump_exit_reminder(session: AsyncSession, trade: Trade) -> Trade:
+    trade.exit_reminder_count += 1
+    trade.exit_prompted_at = _utcnow()
+    await session.commit()
+    await session.refresh(trade)
+    return trade
+
+
+async def skip_entry_journal(session: AsyncSession, trade: Trade) -> TradeJournal:
+    journal = TradeJournal(
+        trade_id=trade.id, user_id=trade.user_id, type="entry", skipped=True,
+    )
+    session.add(journal)
+    await session.flush()
+    trade.entry_journal_id = journal.id
+    if trade.status == "open":
+        trade.status = "entry_skipped"
+    await session.commit()
+    await session.refresh(journal)
+    return journal
+
+
+async def skip_exit_journal(session: AsyncSession, trade: Trade) -> TradeJournal:
+    journal = TradeJournal(
+        trade_id=trade.id, user_id=trade.user_id, type="exit", skipped=True,
+    )
+    session.add(journal)
+    await session.flush()
+    trade.exit_journal_id = journal.id
+    trade.status = "exit_skipped"
+    await session.commit()
+    await session.refresh(journal)
+    return journal
+
+
+async def save_entry_journal(
+    session: AsyncSession, trade: Trade, *,
+    setup_reason: str, emotion: str, plan_followed: str, confidence: int,
+) -> TradeJournal:
+    journal = TradeJournal(
+        trade_id=trade.id, user_id=trade.user_id, type="entry",
+        setup_reason=setup_reason, emotion_entry=emotion,
+        plan_followed=plan_followed, confidence=confidence,
+    )
+    session.add(journal)
+    await session.flush()
+    trade.entry_journal_id = journal.id
+    await session.commit()
+    await session.refresh(journal)
+    return journal
+
+
+async def save_exit_journal(
+    session: AsyncSession, trade: Trade, *,
+    exit_reason: str, plan_followed: str, mistakes: str,
+    emotion: str, rating: int,
+) -> TradeJournal:
+    journal = TradeJournal(
+        trade_id=trade.id, user_id=trade.user_id, type="exit",
+        exit_reason=exit_reason, plan_followed_exit=plan_followed,
+        mistakes=mistakes, emotion_exit=emotion, rating=rating,
+    )
+    session.add(journal)
+    await session.flush()
+    trade.exit_journal_id = journal.id
+    if trade.status in ("closed", "entry_skipped"):
+        trade.status = "fully_journaled"
+    await session.commit()
+    await session.refresh(journal)
+    return journal
+
+
+async def get_recent_trades(
+    session: AsyncSession, user_id: int, limit: int = 10
+) -> list[Trade]:
+    result = await session.execute(
+        select(Trade).where(Trade.user_id == user_id)
+        .order_by(Trade.opened_at.desc()).limit(limit)
+    )
+    return list(result.scalars().all())
+
+
+async def get_trade_by_id(session: AsyncSession, trade_id: int) -> Trade | None:
+    result = await session.execute(select(Trade).where(Trade.id == trade_id))
+    return result.scalar_one_or_none()
+
+
+async def get_journal_for_trade(
+    session: AsyncSession, trade_id: int, type: str
+) -> TradeJournal | None:
+    result = await session.execute(
+        select(TradeJournal).where(
+            TradeJournal.trade_id == trade_id,
+            TradeJournal.type == type,
+        )
     )
     return result.scalar_one_or_none()
