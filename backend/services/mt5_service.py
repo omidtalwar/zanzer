@@ -203,6 +203,20 @@ class MT5Service:
             log.warning("server offset auto-detect failed: %s", exc)
         return timedelta(0)
 
+    def get_server_offset(self) -> timedelta:
+        """Public alias for the broker server UTC offset."""
+        return self._server_offset()
+
+    def get_yesterday_deals(self) -> list[HistoryDeal]:
+        """Deals from the previous broker server day."""
+        offset = self._server_offset()
+        now_utc = datetime.now(tz=timezone.utc)
+        server_now = now_utc + offset
+        server_today = server_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        server_yesterday = server_today - timedelta(days=1)
+        deals = self.get_history_deals(now_utc - timedelta(days=3), now_utc + timedelta(days=1))
+        return [d for d in deals if server_yesterday <= d.time < server_today]
+
     def get_today_deals(self) -> list[HistoryDeal]:
         """Deals since the broker's server-day midnight.
 

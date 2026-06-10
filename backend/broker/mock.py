@@ -5,7 +5,7 @@ close_all_positions is called so tests can assert enforcement behaviour.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from backend.models import AccountInfo, HistoryDeal, OpenPosition
 
@@ -30,6 +30,12 @@ class MockBrokerClient:
 
     def get_today_deals(self) -> list[HistoryDeal]:
         return list(self._deals)
+
+    def get_yesterday_deals(self) -> list[HistoryDeal]:
+        return []
+
+    def get_server_offset(self) -> timedelta:
+        return timedelta(0)
 
     def close_all_positions(self) -> list[str]:
         self.close_all_calls += 1

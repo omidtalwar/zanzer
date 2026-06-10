@@ -148,6 +148,8 @@ class AccountSnapshot(Base):
     exposure_pct: Mapped[float] = mapped_column(Float, default=0.0)
     any_limit_hit: Mapped[bool] = mapped_column(Boolean, default=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    # JSON list of yesterday's completed trades (written by worker, read by /yesterday).
+    yesterday_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class Payment(Base):

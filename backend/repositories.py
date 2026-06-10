@@ -349,7 +349,10 @@ async def add_risk_event(
 
 # --- Live snapshot (written by the worker, read by the bot's /status) -------
 
-async def upsert_snapshot(session: AsyncSession, user_id: int, status) -> AccountSnapshot:
+async def upsert_snapshot(
+    session: AsyncSession, user_id: int, status,
+    yesterday_json: str | None = None,
+) -> AccountSnapshot:
     """Store the latest live data for a user (one row, upserted)."""
     result = await session.execute(
         select(AccountSnapshot).where(AccountSnapshot.user_id == user_id)
@@ -372,6 +375,8 @@ async def upsert_snapshot(session: AsyncSession, user_id: int, status) -> Accoun
     snap.exposure_pct = r.exposure_pct
     snap.any_limit_hit = r.any_limit_hit
     snap.updated_at = _utcnow()
+    if yesterday_json is not None:
+        snap.yesterday_json = yesterday_json
     await session.commit()
     await session.refresh(snap)
     return snap

@@ -11,6 +11,7 @@ Commands:
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timezone
 from html import escape
 
@@ -39,6 +40,7 @@ DISCLAIMER = (
 HELP = (
     "<b>Commands</b>\n"
     "/status — your account, subscription &amp; risk\n"
+    "/yesterday — yesterday's trade performance &amp; sessions\n"
     "/link — connect your MT5 account\n"
     "/risk — view your risk rules\n"
     "/setrisk — set your rules (I guide you step by step)\n"
@@ -54,6 +56,18 @@ HELP = (
 
 def _esc(v) -> str:
     return escape(str(v))
+
+
+def _fmt_duration(secs: int | None) -> str:
+    if secs is None or secs < 0:
+        return "open"
+    if secs < 60:
+        return f"{secs}s"
+    m = secs // 60
+    if m < 60:
+        return f"{m}m"
+    h, rem = divmod(m, 60)
+    return f"{h}h {rem}m" if rem else f"{h}h"
 
 
 def _ago(ts: datetime) -> str:
@@ -110,6 +124,7 @@ class BotDispatcher:
 
         handlers = {
             "start": self._start, "agree": self._agree, "help": self._help, "status": self._status,
+            "yesterday": self._yesterday,
             "link": self._link_start, "risk": self._risk, "setrisk": self._setrisk,
             "lock": self._lock, "unlock": self._unlock, "subscribe": self._subscribe,
             "paid": self._paid, "stars": self._stars,
@@ -221,6 +236,78 @@ class BotDispatcher:
                 f"daily loss, {rs.max_consecutive_losses} losses, {rs.max_account_exposure_pct:.0f}% exposure"
             )
             lines.append("<i>Live balance/PnL appears once your account worker connects (~1 min).</i>")
+        await self.send(telegram_id, "\n".join(lines))
+
+    async def _yesterday(self, telegram_id, username, arg) -> None:
+        async with self._sf() as session:
+            user = await repo.get_user(session, telegram_id)
+            if user is None:
+                await self.send(telegram_id, "You're not registered yet. Send /start.")
+                return
+            snap = await repo.get_snapshot(session, user.id)
+
+        if snap is None or not getattr(snap, "yesterday_json", None):
+            await self.send(
+                telegram_id,
+                "📅 <b>Yesterday's Performance</b>\n\n"
+                "<i>No data yet — this appears after the worker completes its first "
+                "cycle on a day following at least one closed trade.</i>",
+            )
+            return
+
+        try:
+            trades: list[dict] = json.loads(snap.yesterday_json)
+        except (ValueError, TypeError):
+            await self.send(telegram_id, "Could not read yesterday's data. Try again later.")
+            return
+
+        if not trades:
+            await self.send(
+                telegram_id,
+                "📅 <b>Yesterday's Performance</b>\n\n<i>No completed trades yesterday.</i>",
+            )
+            return
+
+        wins = [t for t in trades if t["profit"] > 0]
+        losses = [t for t in trades if t["profit"] <= 0]
+        total_pnl = round(sum(t["profit"] for t in trades), 2)
+        gross_profit = round(sum(t["profit"] for t in wins), 2)
+        gross_loss = round(sum(t["profit"] for t in losses), 2)
+        win_rate = round(len(wins) / len(trades) * 100)
+
+        lines = [
+            "📅 <b>Yesterday's Performance</b>",
+            "",
+            f"Trades: <b>{len(trades)}</b> "
+            f"({'✅' * len(wins)}{'❌' * len(losses)})  "
+            f"Win rate: <b>{win_rate}%</b>",
+            f"Net P&amp;L: <b>{total_pnl:+.2f}</b>  "
+            f"(profit {gross_profit:+.2f} / loss {gross_loss:+.2f})",
+            "",
+        ]
+
+        # Sessions summary
+        session_counts: dict[str, int] = {}
+        for t in trades:
+            s = t.get("session", "Unknown")
+            session_counts[s] = session_counts.get(s, 0) + 1
+        sessions_str = "  ".join(f"{s}: {n}" for s, n in session_counts.items())
+        lines.append(f"Sessions: {_esc(sessions_str)}")
+        lines.append("")
+        lines.append("<b>Trade details</b>")
+
+        for i, t in enumerate(trades, 1):
+            profit = t["profit"]
+            symbol = _esc(t.get("symbol", "?"))
+            direction = _esc(t.get("direction", "?"))
+            session = _esc(t.get("session", "?"))
+            dur = _fmt_duration(t.get("duration_s"))
+            emoji = "✅" if profit > 0 else "❌"
+            lines.append(
+                f"{i}. {emoji} {symbol} {direction} "
+                f"<b>{profit:+.2f}</b> | {dur} | {session}"
+            )
+
         await self.send(telegram_id, "\n".join(lines))
 
     async def _risk(self, telegram_id, username, arg) -> None:

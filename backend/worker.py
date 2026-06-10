@@ -16,7 +16,8 @@ one-terminal-per-process). The Supervisor launches one per active account.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import json
+from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable
 
 from backend import repositories as repo
@@ -40,6 +41,59 @@ log = get_logger("worker")
 
 # notify(text) -> awaitable[bool]; default sends to the central Telegram chat.
 NotifyFn = Callable[[str], Awaitable[bool]]
+
+
+def _trading_session(hour: int) -> str:
+    """Forex session name from UTC hour of trade entry."""
+    sessions = []
+    if hour < 9 or hour >= 23:
+        sessions.append("Asian")
+    if 8 <= hour < 17:
+        sessions.append("London")
+    if 13 <= hour < 22:
+        sessions.append("New York")
+    return "/".join(sessions) if sessions else "Off-hours"
+
+
+def _fmt_duration(secs: int | None) -> str:
+    if secs is None or secs < 0:
+        return "open"
+    if secs < 60:
+        return f"{secs}s"
+    m = secs // 60
+    if m < 60:
+        return f"{m}m"
+    h, rem = divmod(m, 60)
+    return f"{h}h {rem}m" if rem else f"{h}h"
+
+
+def _build_yesterday_trades(deals, server_offset: timedelta) -> list[dict]:
+    """Pair IN/OUT deals by position_id and return one dict per completed trade."""
+    by_pos: dict[int, list] = {}
+    for d in deals:
+        by_pos.setdefault(d.position_id, []).append(d)
+
+    trades = []
+    for pos_deals in by_pos.values():
+        in_deals = [d for d in pos_deals if d.entry == "IN"]
+        out_deals = [d for d in pos_deals if d.entry in ("OUT", "INOUT")]
+        if not in_deals:
+            continue
+        in_d = min(in_deals, key=lambda d: d.time)
+        out_d = max(out_deals, key=lambda d: d.time) if out_deals else None
+        profit = round(sum(d.profit for d in out_deals), 2)
+        duration_s = int((out_d.time - in_d.time).total_seconds()) if out_d else None
+        # Convert server-time-as-UTC back to actual UTC for session detection.
+        actual_utc = in_d.time - server_offset
+        trades.append({
+            "symbol": in_d.symbol,
+            "direction": in_d.direction or "BUY",
+            "profit": profit,
+            "duration_s": duration_s,
+            "session": _trading_session(actual_utc.hour),
+            "entry_time": actual_utc.isoformat(),
+        })
+    return trades
 
 
 class AccountWorker:
@@ -119,9 +173,19 @@ class AccountWorker:
                     )
             raise
 
+        # Compute yesterday's trade performance for /yesterday command.
+        yesterday_json: str | None = None
+        try:
+            offset = self.broker.get_server_offset()
+            yesterday_deals = self.broker.get_yesterday_deals()
+            trades = _build_yesterday_trades(yesterday_deals, offset)
+            yesterday_json = json.dumps(trades)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not fetch yesterday deals for user %s: %s", self.user_id, exc)
+
         # Persist the latest live data so the bot's /status can show it.
         async with self._session_factory() as session:
-            await repo.upsert_snapshot(session, self.user_id, status)
+            await repo.upsert_snapshot(session, self.user_id, status, yesterday_json=yesterday_json)
 
         # Successful read → the account is live/monitored.
         if self.account_id is not None:
