@@ -123,6 +123,37 @@ async def test_dedup_warns_once_across_cycles():
     assert len(sent) == 1
 
 
+async def test_algo_disabled_alerts_user():
+    """If close fails with retcode 10027 (Algo Trading off), the user is warned
+    that protection can't close trades."""
+    from backend.config import settings
+    settings.enforcement_mode = "live"
+    try:
+        from datetime import datetime, timezone
+        from backend.models import OpenPosition
+
+        class AlgoOffBroker(MockBrokerClient):
+            def close_all_positions(self):
+                self.close_all_calls += 1
+                return ["FAILED 7: close of position 7 failed: retcode=10027 AutoTrading disabled by client"]
+
+        Session = await _session_factory()
+        uid = await _new_user(Session)
+        deals = [make_deal(1, "IN"), make_deal(1, "OUT", profit=-60.0)]  # daily-loss breach
+        positions = [OpenPosition(ticket=7, symbol="XAUUSD", direction="BUY", volume=0.1,
+                                  price_open=2400, price_current=2390, sl=0, tp=0, profit=-10,
+                                  time=datetime.now(timezone.utc))]
+        broker = AlgoOffBroker(make_account(balance=940, equity=930, profit=-10),
+                               deals=deals, positions=positions)
+        sent: list[str] = []
+        worker = AccountWorker(broker, user_id=uid, telegram_id=900, limits=LIMITS,
+                               notify=await _captured_notify(sent), session_factory=Session)
+        await worker.run_once()
+        assert any("Algo Trading" in t and "not protected" in t.lower() for t in sent), sent
+    finally:
+        settings.enforcement_mode = "dry_run"
+
+
 async def _run():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

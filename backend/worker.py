@@ -497,8 +497,42 @@ class AccountWorker:
             await repo.add_risk_event(
                 session, self.user_id, "CLOSE_ALL", "; ".join(results) or "no positions"
             )
+            # Detect silent-protection-failure: terminal has Algo Trading OFF, so
+            # close orders are rejected (retcode 10027). Alert user + admins.
+            if any("10027" in r or "AutoTrading disabled" in r for r in results):
+                await self._alert_algo_disabled(session)
             return action.model_copy(
                 update={"executed": True, "detail": "; ".join(results) or "no positions"}
             )
 
         return action.model_copy(update={"executed": False, "detail": "unknown action"})
+
+    async def _alert_algo_disabled(self, session) -> None:
+        """Warn the user + admins that protection can't close trades because the
+        MT5 terminal's Algo Trading is disabled. Deduped once per day."""
+        if self._dedup("ALGO_OFF"):
+            return
+        await repo.add_risk_event(
+            session, self.user_id, "ALGO_DISABLED",
+            "Algo Trading disabled in terminal — could not close (retcode 10027)",
+        )
+        await self.notify(
+            "🚨 <b>Protection can't close your trades!</b>\n\n"
+            "Your MT5 terminal has <b>Algo Trading turned OFF</b>, so Zanzer is "
+            "blocked from closing positions when a risk limit is hit.\n\n"
+            "👉 In MetaTrader 5, click the <b>Algo Trading</b> button in the toolbar "
+            "so it turns green (or Tools → Options → Expert Advisors → "
+            "'Allow algorithmic trading'). You are <b>not protected</b> until you do."
+        )
+        # Notify admins too — a customer silently unprotected is an ops issue.
+        for admin_id in settings.admin_ids:
+            if admin_id == self.telegram_id:
+                continue
+            try:
+                await bot_client.send_message(
+                    admin_id,
+                    f"⚠️ Algo Trading is OFF for user <code>{self.telegram_id}</code> "
+                    f"(account {self.account_id}) — closes are failing (retcode 10027).",
+                )
+            except Exception:  # noqa: BLE001
+                pass
