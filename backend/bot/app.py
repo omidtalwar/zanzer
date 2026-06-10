@@ -85,7 +85,7 @@ async def run() -> None:
             except Exception as exc:  # noqa: BLE001 - one bad update shouldn't kill the bot
                 log.error("handler error for %s: %s", telegram_id, exc)
                 try:
-                    await client.send_message(telegram_id, "Something went wrong. Try /help.")
+                    await client.send_message(telegram_id, "Something went wrong. Try /menu.")
                 except Exception:
                     pass
 

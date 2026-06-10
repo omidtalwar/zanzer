@@ -5,7 +5,7 @@ Holds a small in-memory FSM for the multi-step /link flow (fine for a single
 long-polling process).
 
 Commands:
-  user : /start /help /status /link /risk /lock /unlock /subscribe /paid /cancel
+  user : /start /menu /status /link /risk /lock /unlock /subscribe /paid /cancel
   admin: /pending /verify <id> /activate <telegram_id> <days> [plan] /users
 """
 from __future__ import annotations
@@ -51,7 +51,7 @@ HELP = (
     "/subscribe — pay with crypto (auto)\n"
     "/stars — pay with Telegram Stars ⭐\n"
     "/paid &lt;tx_hash&gt; — submit a manual payment\n"
-    "/help — this message\n\n"
+    "/menu — show this menu\n\n"
     "<i>Note: a lock can't be removed on demand — that's by design, to protect "
     "you from emotional trading. It clears automatically at the next trading day.</i>"
 )
@@ -89,11 +89,11 @@ def _ago(ts: datetime) -> str:
 class BotDispatcher:
     def __init__(self, send, delete=None, validator=None, provisioner=None,
                  invoicer=None, star_invoicer=None, session_factory=SessionLocal) -> None:
-        # Wrap send so every outgoing message ends with a /help footer.
+        # Wrap send so every outgoing message ends with a /menu footer.
         _raw_send = send
         async def _send_with_help(chat_id, text):
-            footer = "\n\n/help"
-            if not str(text).rstrip().endswith("/help"):
+            footer = "\n\n/menu"
+            if not str(text).rstrip().endswith("/menu"):
                 text = str(text) + footer
             return await _raw_send(chat_id, text)
         self.send = _send_with_help
@@ -125,7 +125,7 @@ class BotDispatcher:
             return
 
         if not text.startswith("/"):
-            await self.send(telegram_id, "Type /help to see what I can do.")
+            await self.send(telegram_id, "Type /menu to see what I can do.")
             return
 
         cmd, _, arg = text.partition(" ")
@@ -138,7 +138,7 @@ class BotDispatcher:
             return
 
         handlers = {
-            "start": self._start, "agree": self._agree, "help": self._help, "status": self._status,
+            "start": self._start, "agree": self._agree, "menu": self._menu, "status": self._status,
             "yesterday": self._yesterday, "trades": self._trades, "journal": self._journal,
             "link": self._link_start, "risk": self._risk, "setrisk": self._setrisk,
             "lock": self._lock, "unlock": self._unlock, "subscribe": self._subscribe,
@@ -151,7 +151,7 @@ class BotDispatcher:
         }
         handler = handlers.get(cmd)
         if handler is None:
-            await self.send(telegram_id, "Unknown command. /help")
+            await self.send(telegram_id, "Unknown command. /menu")
             return
         await handler(telegram_id, username, arg)
 
@@ -179,7 +179,7 @@ class BotDispatcher:
                 "To start protecting your account:\n"
                 "1) /link your MT5 account\n"
                 "2) /subscribe (crypto) or /stars to activate\n\n"
-                "/help for all commands."
+                "/menu for all commands."
             )
         await self.send(telegram_id, f"{DISCLAIMER}\n\n{tail}")
 
@@ -193,10 +193,10 @@ class BotDispatcher:
             "1) /link your MT5 account\n"
             "2) /setrisk to set your risk rules (I'll guide you)\n"
             "3) /subscribe (crypto) or /stars to activate protection\n\n"
-            "/help for all commands.",
+            "/menu for all commands.",
         )
 
-    async def _help(self, telegram_id, username, arg) -> None:
+    async def _menu(self, telegram_id, username, arg) -> None:
         await self.send(telegram_id, HELP)
 
     async def _status(self, telegram_id, username, arg) -> None:
