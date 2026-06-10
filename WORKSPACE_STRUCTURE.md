@@ -136,3 +136,60 @@ The following tree shows the project folder layout for `zanzer`, excluding the `
 - `test_risk_service.py`
 - `test_supervisor.py`
 - `test_worker.py`
+
+
+# Copy this file to .env and fill in real values. Never commit .env.
+
+# --- MetaTrader 5 ---
+# Leave MT5_LOGIN blank to attach to an already-running, logged-in terminal.
+# Fill all three to have the app log in to a specific account.
+MT5_LOGIN=
+MT5_PASSWORD=
+MT5_SERVER=
+# Optional: full path to terminal64.exe if not auto-detected
+MT5_TERMINAL_PATH=
+BROKER_UTC_OFFSET_HOURS=3
+BASE_TERMINAL_DIR=C:\Program Files\MetaTrader 5
+TERMINALS_ROOT=terminals
+AUTO_PROVISION=false
+
+# --- Telegram ---
+# Create a bot via @BotFather to get the token.
+# Get your chat id by messaging the bot then calling getUpdates, or via @userinfobot.
+TELEGRAM_BOT_TOKEN=8980008444:AAFgesyOrWc5WoW-Wvy3EHwlDNm73_pBkP4
+TELEGRAM_CHAT_ID=5625070857
+BOT_ADMIN_IDS=5625070857
+CRYPTO_WALLET_ADDRESS=
+CRYPTO_CURRENCY=USDT
+PRICE_MONTHLY=20
+PRICE_QUARTERLY=50
+CRYPTOPAY_TOKEN=593226:AAplAsaGEnQC4g6IUVyTOp5rkqY24LqMDFt
+CRYPTOPAY_TESTNET=false
+CRYPTOPAY_ASSET=USDT
+PRICE_MONTHLY_STARS=500
+PRICE_QUARTERLY_STARS=1200
+
+# --- Risk Rules (defaults from PRD; adjust as needed) ---
+MAX_TRADES_PER_DAY=2
+MAX_DAILY_LOSS_PCT=5
+MAX_RISK_PER_TRADE_PCT=4
+MAX_CONSECUTIVE_LOSSES=2
+MAX_ACCOUNT_EXPOSURE_PCT=5
+
+# --- Enforcement (V2) ---
+ENFORCEMENT_MODE=live
+RISK_CHECK_INTERVAL_SECONDS=30
+LOCK_STATE_PATH=data/lock_state.json
+ADMIN_TOKEN=zanzer-admin-2026
+DASHBOARD_PORT=8090
+ENCRYPTION_KEY=8DAUWVXs0OsGAb3HIaUBZeBbRj52ONeuxto9CVhdkdw=
+
+# --- AI Performance Coach (Hermes) ---
+# Using OpenAI for now. Paste your key after the = (no quotes, no spaces).
+AI_PROVIDER=openai
+OPENAI_API_KEY=
+OPENAI_MODEL=gpt-4o-mini
+AI_COACH_ENABLED=true
+
+# --- App ---
+APP_ENV=development
