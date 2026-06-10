@@ -370,6 +370,8 @@ class AccountWorker:
             async with self._session_factory() as session:
                 user = await repo.get_user(session, self.telegram_id)
                 if user and user.risk_settings:
+                    # Apply any deferred (looser) rule change whose day has come.
+                    await repo.promote_pending_risk(session, user.risk_settings)
                     self.limits = RiskLimits.from_orm(user.risk_settings)
         except Exception as exc:  # noqa: BLE001
             log.warning("could not refresh limits for user %s: %s", self.user_id, exc)

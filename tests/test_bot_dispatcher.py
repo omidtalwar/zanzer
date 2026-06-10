@@ -276,13 +276,18 @@ async def test_setrisk_wizard_full_flow():
     await d.handle(telegram_id=80, username="u", text="skip")       # exposure (keep)
     async with Session() as s:
         u = await repo.get_user(s, 80)
-        assert u.risk_settings.max_trades_per_day == 1
-        assert u.risk_settings.max_daily_loss_usd == 50
-        assert u.risk_settings.max_daily_loss_pct == 0   # $ chosen → % off
-        assert u.risk_settings.max_risk_per_trade_pct == 2
-        assert u.risk_settings.max_consecutive_losses == 3
+        rs = u.risk_settings
+        # Tightenings apply immediately:
+        assert rs.max_trades_per_day == 1          # 2 -> 1 (stricter)
+        assert rs.max_daily_loss_usd == 50         # off -> 50 (stricter)
+        assert rs.max_risk_per_trade_pct == 2      # 4 -> 2 (stricter)
+        # Loosenings are DEFERRED (active values unchanged, queued as pending):
+        assert rs.max_daily_loss_pct == 5          # 5% -> off is looser -> deferred
+        assert rs.max_consecutive_losses == 2      # 2 -> 3 is looser -> deferred
+        assert rs.pending_json and rs.pending_effective
     assert 80 not in d.states  # wizard finished
     assert any("rules are saved" in t.lower() for _, t in sent)
+    assert any("tomorrow" in t.lower() for _, t in sent)  # deferral notice
 
 
 async def test_setrisk_wizard_percent_and_invalid_retry():
@@ -300,9 +305,11 @@ async def test_setrisk_wizard_percent_and_invalid_retry():
     await d.handle(telegram_id=81, username="u", text="off")  # exposure off
     async with Session() as s:
         u = await repo.get_user(s, 81)
-        assert u.risk_settings.max_daily_loss_pct == 4
+        assert u.risk_settings.max_daily_loss_pct == 4   # 5% -> 4% (stricter, applies)
         assert u.risk_settings.max_daily_loss_usd == 0
-        assert u.risk_settings.max_account_exposure_pct == 0
+        # exposure "off" is a loosening -> deferred; active stays at the default 5.
+        assert u.risk_settings.max_account_exposure_pct == 5
+        assert u.risk_settings.pending_json  # the off-exposure change is queued
 
 
 async def test_admin_broadcast_reaches_all_users():
@@ -405,6 +412,29 @@ async def test_coach_daily_quota():
         assert d._coach_quota_ok(1) is True
     finally:
         settings.coach_daily_limit = old
+
+
+async def test_risk_change_is_asymmetric():
+    """Stricter rule changes apply now; looser ones defer to the next day."""
+    Session = await _session_factory()
+    async with Session() as s:
+        u = await repo.register_user(s, 90, "u")  # defaults: trades=2, losses=2
+        # Tighten trades 2->1 -> applies now.
+        applied, deferred, eff = await repo.apply_risk_change(s, u, {"max_trades_per_day": 1})
+        u = await repo.get_user(s, 90)
+        assert u.risk_settings.max_trades_per_day == 1 and not deferred
+        # Loosen trades 1->5 -> deferred, active stays 1.
+        applied, deferred, eff = await repo.apply_risk_change(s, u, {"max_trades_per_day": 5})
+        u = await repo.get_user(s, 90)
+        assert u.risk_settings.max_trades_per_day == 1   # unchanged today
+        assert deferred == {"max_trades_per_day": 5} and eff
+        # Force the effective day into the past, then promote.
+        u.risk_settings.pending_effective = "2000-01-01"
+        await s.commit()
+        promoted = await repo.promote_pending_risk(s, u.risk_settings)
+        u = await repo.get_user(s, 90)
+        assert promoted and u.risk_settings.max_trades_per_day == 5
+        assert u.risk_settings.pending_json is None
 
 
 async def _run():

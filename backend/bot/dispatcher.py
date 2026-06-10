@@ -59,6 +59,37 @@ def _home_keyboard(is_admin: bool) -> dict:
 
 _BACK_KB = _ik([[("⬅️ Back to menu", "m:home")]])
 
+_BACK_ROW = [("⬅️ Back to menu", "m:home")]
+
+# Per-section keyboards: tappable buttons that RUN the command (callback "c:<cmd>").
+_SECTION_KB = {
+    "perf": _ik([
+        [("📊 Status", "c:status"), ("📅 Today", "c:today")],
+        [("🗓 Yesterday", "c:yesterday"), ("📈 Weekly", "c:weekly")],
+        [("📉 Monthly", "c:monthly"), ("🏆 All-time", "c:performance")],
+        _BACK_ROW,
+    ]),
+    "journal": _ik([
+        [("📓 Journal", "c:journal"), ("📑 Trades", "c:trades")],
+        [("🤖 Coach", "c:coach")],
+        _BACK_ROW,
+    ]),
+    "settings": _ik([
+        [("🛡️ View rules", "c:risk"), ("⚙️ Set rules", "c:setrisk")],
+        [("🔗 Link MT5", "c:link"), ("🔒 Lock today", "c:lock")],
+        _BACK_ROW,
+    ]),
+    "sub": _ik([
+        [("💳 Subscribe", "c:subscribe"), ("⭐ Stars", "c:stars")],
+        _BACK_ROW,
+    ]),
+    "admin": _ik([
+        [("💰 Pending", "c:pending"), ("👥 Users", "c:users")],
+        [("🖥 Accounts", "c:accounts")],
+        _BACK_ROW,
+    ]),
+}
+
 # Section bodies — commands stay tappable in Telegram.
 _SECTION_TEXT = {
     "perf": (
@@ -254,9 +285,22 @@ class BotDispatcher:
     # ------------------------------------------------------------- user cmds
     async def _start(self, telegram_id, username, arg) -> None:
         async with self._sf() as session:
+            existed = await repo.get_user(session, telegram_id) is not None
             user = await repo.register_user(session, telegram_id, username)
             accepted = user.tos_accepted_at is not None
             active = repo.subscription_is_active(user.subscription)
+        # Notify admins when a brand-new user joins the bot.
+        if not existed:
+            handle = f"@{username}" if username else "—"
+            for admin_id in settings.admin_ids:
+                if admin_id == telegram_id:
+                    continue
+                await self.send(
+                    admin_id,
+                    f"🆕 <b>New user joined</b>\n"
+                    f"Telegram id: <code>{telegram_id}</code>\n"
+                    f"Username: {_esc(handle)}",
+                )
         if not accepted:
             tail = (
                 "By continuing you confirm you have read and accept these terms.\n"
@@ -315,20 +359,33 @@ class BotDispatcher:
     async def handle_callback(self, *, telegram_id: int, username: str | None,
                               data: str, callback_query_id: str,
                               message_id: int | None = None) -> None:
-        """Handle inline-menu button taps (callback queries)."""
+        """Handle inline-menu button taps (callback queries).
+
+        Two kinds of callback data:
+          m:<section>  → navigate (edit the menu message in place)
+          c:<command>  → run that command directly (sends its normal output)
+        """
         if self.answer_cbq:
             try:
                 await self.answer_cbq(callback_query_id)
             except Exception:  # noqa: BLE001
                 pass
-        key = data.split(":", 1)[1] if ":" in data else "home"
-        if key == "home":
+
+        kind, _, key = data.partition(":")
+
+        # Direct command buttons.
+        if kind == "c":
+            await self._run_command_button(telegram_id, username, key)
+            return
+
+        # Section navigation (kind == "m").
+        if key == "home" or not key:
             text = await self._home_text(telegram_id)
             kb = _home_keyboard(self._is_admin(telegram_id))
         elif key == "admin" and not self._is_admin(telegram_id):
             text, kb = "Not authorized.", _BACK_KB
         elif key in _SECTION_TEXT:
-            text, kb = _SECTION_TEXT[key], _BACK_KB
+            text, kb = _SECTION_TEXT[key], _SECTION_KB.get(key, _BACK_KB)
         else:
             text = await self._home_text(telegram_id)
             kb = _home_keyboard(self._is_admin(telegram_id))
@@ -336,6 +393,23 @@ class BotDispatcher:
             if await self.edit(telegram_id, message_id, text, reply_markup=kb):
                 return
         await self.send(telegram_id, text, reply_markup=kb)
+
+    async def _run_command_button(self, telegram_id, username, cmd: str) -> None:
+        """Map a c:<cmd> button to its existing command handler (no args)."""
+        handlers = {
+            "status": self._status, "today": self._today, "yesterday": self._yesterday,
+            "weekly": self._weekly, "monthly": self._monthly, "performance": self._performance,
+            "journal": self._journal, "trades": self._trades, "coach": self._coach,
+            "risk": self._risk, "setrisk": self._setrisk, "link": self._link_start,
+            "lock": self._lock, "subscribe": self._subscribe, "stars": self._stars,
+            "pending": self._admin_pending, "users": self._admin_users,
+            "accounts": self._admin_accounts,
+        }
+        handler = handlers.get(cmd)
+        if handler is None:
+            await self.send(telegram_id, "Unknown action. /menu")
+            return
+        await handler(telegram_id, username, "")
 
     async def _status(self, telegram_id, username, arg) -> None:
         async with self._sf() as session:
@@ -1305,20 +1379,38 @@ class BotDispatcher:
                 await self.send(telegram_id, "Send /start first.")
                 return
             rs = user.risk_settings
+            pending_json = rs.pending_json
+            pending_effective = rs.pending_effective
         usd = getattr(rs, "max_daily_loss_usd", 0.0) or 0.0
         daily = (f"{rs.max_daily_loss_pct:g}%" if rs.max_daily_loss_pct > 0 else "off")
         daily_usd = (f"{usd:g} (account currency)" if usd > 0 else "off")
-        await self.send(
-            telegram_id,
-            "<b>🛡️ Your risk rules</b>\n"
+        text = (
+            "<b>🛡️ Your risk rules</b> (currently active)\n"
             f"• Max trades/day: <b>{rs.max_trades_per_day}</b>\n"
             f"• Max daily loss %: <b>{daily}</b>\n"
             f"• Max daily loss $: <b>{daily_usd}</b>\n"
             f"• Max risk/trade: <b>{rs.max_risk_per_trade_pct:g}%</b>\n"
             f"• Max consecutive losses: <b>{rs.max_consecutive_losses}</b>\n"
-            f"• Max exposure: <b>{rs.max_account_exposure_pct:g}%</b>\n\n"
-            "👉 To change them, send /setrisk and I'll ask one simple question at a time.",
+            f"• Max exposure: <b>{rs.max_account_exposure_pct:g}%</b>\n"
         )
+        if pending_json and pending_effective:
+            import json as _json
+            try:
+                pend = _json.loads(pending_json)
+            except Exception:  # noqa: BLE001
+                pend = {}
+            _lbl = {
+                "max_trades_per_day": "trades/day", "max_daily_loss_pct": "daily loss %",
+                "max_daily_loss_usd": "daily loss $", "max_risk_per_trade_pct": "risk/trade",
+                "max_consecutive_losses": "losses in a row", "max_account_exposure_pct": "exposure",
+            }
+            changes = ", ".join(f"{_lbl.get(k, k)} → {v:g}" if isinstance(v, (int, float)) else f"{_lbl.get(k, k)} → {v}" for k, v in pend.items())
+            text += (
+                f"\n⏳ <b>Pending (looser) change</b> takes effect <b>{_esc(pending_effective)}</b>: "
+                f"{_esc(changes)}\n<i>Loosening is delayed to protect you from emotional changes.</i>\n"
+            )
+        text += "\n👉 To change them, send /setrisk — tightening applies instantly."
+        await self.send(telegram_id, text)
 
     # --- /setrisk guided wizard --------------------------------------------
     _SETRISK_STEPS = ["trades", "dailyloss", "riskpertrade", "losses", "exposure"]
@@ -1390,21 +1482,39 @@ class BotDispatcher:
             await self.send(telegram_id, self._setrisk_prompt(self._SETRISK_STEPS[idx], data))
             return
 
-        # Done — save everything.
+        # Done — save with anti-gaming: stricter now, looser deferred to tomorrow.
         self.states.pop(telegram_id, None)
+        deferred: dict = {}
+        effective = None
         async with self._sf() as session:
             user = await repo.get_user(session, telegram_id)
             if user is not None:
-                await repo.update_risk_settings(session, user, data)
-        await self.send(
-            telegram_id,
-            "✅ <b>Your rules are saved</b> (they apply within a minute):\n"
-            f"• Trades/day: <b>{data['max_trades_per_day']}</b>\n"
-            f"• Daily loss: <b>{self._daily_loss_desc(data)}</b>\n"
-            f"• Risk/trade: <b>{data['max_risk_per_trade_pct']:g}%</b>\n"
-            f"• Losses in a row: <b>{data['max_consecutive_losses']}</b>\n"
-            f"• Exposure: <b>{data['max_account_exposure_pct']:g}%</b>\n\n/status",
-        )
+                _applied, deferred, effective = await repo.apply_risk_change(session, user, data)
+
+        _labels = {
+            "max_trades_per_day": "Trades/day",
+            "max_daily_loss_pct": "Daily loss %", "max_daily_loss_usd": "Daily loss $",
+            "max_risk_per_trade_pct": "Risk/trade", "max_consecutive_losses": "Losses in a row",
+            "max_account_exposure_pct": "Exposure",
+        }
+        msg = [
+            "✅ <b>Your rules are saved.</b>",
+            f"• Trades/day: <b>{data['max_trades_per_day']}</b>",
+            f"• Daily loss: <b>{self._daily_loss_desc(data)}</b>",
+            f"• Risk/trade: <b>{data['max_risk_per_trade_pct']:g}%</b>",
+            f"• Losses in a row: <b>{data['max_consecutive_losses']}</b>",
+            f"• Exposure: <b>{data['max_account_exposure_pct']:g}%</b>",
+        ]
+        if deferred:
+            names = ", ".join(_labels.get(k, k) for k in deferred)
+            msg.append(
+                f"\n🛡️ <b>Heads up:</b> you <i>loosened</i> {names}. To protect you "
+                f"from emotional changes, looser limits take effect <b>tomorrow "
+                f"({_esc(effective)})</b>. Until then your current (stricter) limits "
+                f"stay active. Tightening always applies instantly."
+            )
+        msg.append("\n/status")
+        await self.send(telegram_id, "\n".join(msg))
 
     def _apply_setrisk_answer(self, step: str, t: str, data: dict) -> str | None:
         """Apply one answer to `data`. Returns an error string if invalid."""

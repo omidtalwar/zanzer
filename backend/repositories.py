@@ -113,6 +113,81 @@ async def update_risk_settings(
     return rs
 
 
+# --- Anti-gaming: stricter applies now, looser is deferred to next day -------
+
+# Fields where 0 means "off" (no cap) = the MOST permissive setting.
+_OFF_MEANS_UNLIMITED = {"max_daily_loss_pct", "max_daily_loss_usd", "max_account_exposure_pct"}
+
+
+def _permissiveness(field: str, value) -> float:
+    """Higher = more permissive (looser). 0 on an 'off' field = unlimited."""
+    if value is None:
+        return 0.0
+    if field in _OFF_MEANS_UNLIMITED and value == 0:
+        return float("inf")
+    return float(value)
+
+
+async def apply_risk_change(session: AsyncSession, user: User, changes: dict):
+    """Apply risk-rule changes asymmetrically.
+
+    Stricter (or equal) changes take effect immediately. Looser changes are
+    stored as pending and only take effect the next trading day — so a trader
+    can't relax their own limits in the heat of the moment.
+
+    Returns (applied: dict, deferred: dict, effective_date: str | None).
+    """
+    rs = user.risk_settings
+    applied: dict = {}
+    deferred: dict = {}
+    for field, new_val in changes.items():
+        if new_val is None or not hasattr(rs, field):
+            continue
+        old_val = getattr(rs, field)
+        if old_val is not None and _permissiveness(field, new_val) > _permissiveness(field, old_val):
+            deferred[field] = new_val          # looser → wait until tomorrow
+        else:
+            setattr(rs, field, new_val)        # stricter/equal → now
+            applied[field] = new_val
+
+    effective = None
+    if deferred:
+        # Merge with any existing pending set (latest wins).
+        existing = {}
+        if rs.pending_json:
+            try:
+                existing = __import__("json").loads(rs.pending_json)
+            except Exception:  # noqa: BLE001
+                existing = {}
+        existing.update(deferred)
+        rs.pending_json = __import__("json").dumps(existing)
+        effective = (_utcnow() + timedelta(days=1)).strftime("%Y-%m-%d")
+        rs.pending_effective = effective
+    await session.commit()
+    await session.refresh(rs)
+    return applied, deferred, effective
+
+
+async def promote_pending_risk(session: AsyncSession, rs: RiskSettings) -> bool:
+    """If a pending (looser) change's effective day has arrived, apply it.
+    Returns True if something was promoted."""
+    if not rs.pending_json or not rs.pending_effective:
+        return False
+    if rs.pending_effective > _today_str():
+        return False
+    try:
+        pending = __import__("json").loads(rs.pending_json)
+    except Exception:  # noqa: BLE001
+        pending = {}
+    for field, value in pending.items():
+        if hasattr(rs, field):
+            setattr(rs, field, value)
+    rs.pending_json = None
+    rs.pending_effective = None
+    await session.commit()
+    return True
+
+
 async def add_account(
     session: AsyncSession,
     user: User,

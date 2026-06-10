@@ -98,6 +98,10 @@ class RiskSettings(Base):
     max_risk_per_trade_pct: Mapped[float] = mapped_column(Float, default=4.0)
     max_consecutive_losses: Mapped[int] = mapped_column(Integer, default=2)
     max_account_exposure_pct: Mapped[float] = mapped_column(Float, default=5.0)
+    # Anti-gaming: loosening a rule is deferred to the next trading day. The
+    # looser values wait here (JSON) until pending_effective (YYYY-MM-DD).
+    pending_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pending_effective: Mapped[str | None] = mapped_column(String(10), nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="risk_settings")
 
