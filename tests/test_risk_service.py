@@ -65,6 +65,30 @@ def test_consecutive_losses_streak_from_newest():
     assert r.consecutive_loss_limit_hit  # default max is 2
 
 
+def test_breakeven_scratch_is_not_a_loss():
+    # A near-zero close (-$0.40) is a breakeven scratch, not a loss: it ends the
+    # streak. Here: two real losses then a BE scratch (newest) -> streak 0.
+    deals = [
+        _deal(1, "OUT", profit=-5.0, t=datetime(2026, 6, 7, 9, 0, tzinfo=timezone.utc)),
+        _deal(2, "OUT", profit=-6.0, t=datetime(2026, 6, 7, 10, 0, tzinfo=timezone.utc)),
+        _deal(3, "OUT", profit=-0.40, t=datetime(2026, 6, 7, 11, 0, tzinfo=timezone.utc)),
+    ]
+    r = compute_risk_status(_account(), deals)
+    assert r.consecutive_losses == 0          # BE scratch (newest) ends the run
+    assert not r.consecutive_loss_limit_hit
+
+
+def test_breakeven_between_real_losses():
+    # losses on both sides of a BE: streak only counts the trailing real loss.
+    deals = [
+        _deal(1, "OUT", profit=-5.0, t=datetime(2026, 6, 7, 9, 0, tzinfo=timezone.utc)),
+        _deal(2, "OUT", profit=-0.50, t=datetime(2026, 6, 7, 10, 0, tzinfo=timezone.utc)),  # BE
+        _deal(3, "OUT", profit=-4.0, t=datetime(2026, 6, 7, 11, 0, tzinfo=timezone.utc)),
+    ]
+    r = compute_risk_status(_account(), deals)
+    assert r.consecutive_losses == 1          # newest is a loss, then BE stops it
+
+
 def test_partial_closes_collapse_by_position():
     # one position closed in two partial deals, net positive -> not a loss
     deals = [

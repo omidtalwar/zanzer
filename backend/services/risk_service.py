@@ -16,6 +16,7 @@ Definitions used:
 """
 from __future__ import annotations
 
+from backend.config import settings
 from backend.models import AccountInfo, HistoryDeal, RiskLimits, RiskStatus
 
 
@@ -33,7 +34,12 @@ def _consecutive_losses(deals: list[HistoryDeal]) -> int:
 
     One position can close in multiple partial deals; we collapse by
     position_id and use the net profit of each closed position.
+
+    A BREAKEVEN scratch (|net P&L| <= breakeven_band, e.g. a -$0.40 close) is
+    NOT a loss — it does not extend the streak (and, being trailing, ends it),
+    so disciplined scratching is never punished.
     """
+    band = settings.breakeven_band
     closed: dict[int, float] = {}
     order: list[int] = []
     for d in deals:
@@ -46,9 +52,9 @@ def _consecutive_losses(deals: list[HistoryDeal]) -> int:
     streak = 0
     # `order` is chronological (deals come time-ascending); walk newest -> oldest.
     for pid in reversed(order):
-        if closed[pid] < 0:
+        if closed[pid] < -band:      # a real loss (beyond the breakeven band)
             streak += 1
-        else:
+        else:                         # win or breakeven scratch → streak ends
             break
     return streak
 

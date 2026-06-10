@@ -111,9 +111,12 @@ class Settings(BaseSettings):
 
     # Anti-gaming: when True, LOOSENING a risk rule is deferred to the next
     # trading day (tightening is always instant) so users can't relax limits in
-    # the heat of the moment. Temporarily False per owner request → all /setrisk
-    # changes apply immediately. TODO: set back to True before public launch.
-    defer_loosening: bool = False
+    # the heat of the moment.
+    defer_loosening: bool = True
+    # A trade whose net P&L is within ±this many units of the account currency
+    # is treated as BREAKEVEN (a scratch) — NOT a loss — for the consecutive-loss
+    # rule. e.g. 1.0 → a -$0.40 scratch won't extend a losing streak.
+    breakeven_band: float = 1.0
 
     # --- App ---
     app_env: str = "development"
