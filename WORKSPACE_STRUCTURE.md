@@ -176,20 +176,7 @@ MAX_RISK_PER_TRADE_PCT=4
 MAX_CONSECUTIVE_LOSSES=2
 MAX_ACCOUNT_EXPOSURE_PCT=5
 
-# --- Enforcement (V2) ---
-ENFORCEMENT_MODE=live
-RISK_CHECK_INTERVAL_SECONDS=30
-LOCK_STATE_PATH=data/lock_state.json
-ADMIN_TOKEN=zanzer-admin-2026
-DASHBOARD_PORT=8090
-ENCRYPTION_KEY=8DAUWVXs0OsGAb3HIaUBZeBbRj52ONeuxto9CVhdkdw=
 
-# --- AI Performance Coach (Hermes) ---
-# Using OpenAI for now. Paste your key after the = (no quotes, no spaces).
-AI_PROVIDER=openai
-OPENAI_API_KEY=
-OPENAI_MODEL=gpt-4o-mini
-AI_COACH_ENABLED=true
 
 # --- App ---
 APP_ENV=development
