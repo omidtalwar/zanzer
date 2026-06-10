@@ -527,6 +527,10 @@ class AccountWorker:
             # close orders are rejected (retcode 10027). Alert user + admins.
             if any("10027" in r or "AutoTrading disabled" in r for r in results):
                 await self._alert_algo_disabled(session)
+            # A trade opened while already locked → anonymized channel social proof.
+            elif ("account locked" in action.reason.lower()
+                  and any(r.startswith("closed") for r in results)):
+                await self._post_channel_event("blocked_while_locked")
             return action.model_copy(
                 update={"executed": True, "detail": "; ".join(results) or "no positions"}
             )

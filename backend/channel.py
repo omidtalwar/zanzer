@@ -94,6 +94,7 @@ _EVENT_TEXT = {
     "lock_streak": "🧊 A trader hit a <b>losing streak</b>. ZanZer enforced a cool-off lock to break the tilt.",
     "lock_score": "🧠 A trader's <b>discipline score</b> dropped too low. Trading locked for the day to protect their capital.",
     "revenge": "🚫 <b>Revenge trade</b> detected and flagged. ZanZer doesn't let one bad trade become five.",
+    "blocked_while_locked": "🔒 A trader tried to open a trade <b>while locked</b> — ZanZer closed it instantly. No trading on tilt. 🛡️",
 }
 
 
