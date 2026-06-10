@@ -109,6 +109,12 @@ class Settings(BaseSettings):
     # Max /coach calls per user per UTC day (cost protection). 0 = unlimited.
     coach_daily_limit: int = 10
 
+    # Anti-gaming: when True, LOOSENING a risk rule is deferred to the next
+    # trading day (tightening is always instant) so users can't relax limits in
+    # the heat of the moment. Temporarily False per owner request → all /setrisk
+    # changes apply immediately. TODO: set back to True before public launch.
+    defer_loosening: bool = False
+
     # --- App ---
     app_env: str = "development"
 

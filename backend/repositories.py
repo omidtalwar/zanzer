@@ -140,14 +140,16 @@ async def apply_risk_change(session: AsyncSession, user: User, changes: dict):
     rs = user.risk_settings
     applied: dict = {}
     deferred: dict = {}
+    defer = settings.defer_loosening
     for field, new_val in changes.items():
         if new_val is None or not hasattr(rs, field):
             continue
         old_val = getattr(rs, field)
-        if old_val is not None and _permissiveness(field, new_val) > _permissiveness(field, old_val):
+        if (defer and old_val is not None
+                and _permissiveness(field, new_val) > _permissiveness(field, old_val)):
             deferred[field] = new_val          # looser → wait until tomorrow
         else:
-            setattr(rs, field, new_val)        # stricter/equal → now
+            setattr(rs, field, new_val)        # stricter/equal (or instant mode) → now
             applied[field] = new_val
 
     effective = None
@@ -173,7 +175,9 @@ async def promote_pending_risk(session: AsyncSession, rs: RiskSettings) -> bool:
     Returns True if something was promoted."""
     if not rs.pending_json or not rs.pending_effective:
         return False
-    if rs.pending_effective > _today_str():
+    # When deferral is off (instant mode), apply queued changes right away;
+    # otherwise only once their effective day has arrived.
+    if settings.defer_loosening and rs.pending_effective > _today_str():
         return False
     try:
         pending = __import__("json").loads(rs.pending_json)

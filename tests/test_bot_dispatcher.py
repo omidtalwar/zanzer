@@ -265,51 +265,59 @@ async def test_stars_uses_star_invoicer():
 
 
 async def test_setrisk_wizard_full_flow():
-    Session = await _session_factory()
-    d, sent, _ = _make_dispatcher(Session)
-    await d.handle(telegram_id=80, username="u", text="/start")
-    await d.handle(telegram_id=80, username="u", text="/setrisk")   # starts wizard
-    await d.handle(telegram_id=80, username="u", text="1")          # trades
-    await d.handle(telegram_id=80, username="u", text="50$")        # daily loss in $
-    await d.handle(telegram_id=80, username="u", text="2")          # risk/trade
-    await d.handle(telegram_id=80, username="u", text="3")          # losses
-    await d.handle(telegram_id=80, username="u", text="skip")       # exposure (keep)
-    async with Session() as s:
-        u = await repo.get_user(s, 80)
-        rs = u.risk_settings
-        # Tightenings apply immediately:
-        assert rs.max_trades_per_day == 1          # 2 -> 1 (stricter)
-        assert rs.max_daily_loss_usd == 50         # off -> 50 (stricter)
-        assert rs.max_risk_per_trade_pct == 2      # 4 -> 2 (stricter)
-        # Loosenings are DEFERRED (active values unchanged, queued as pending):
-        assert rs.max_daily_loss_pct == 5          # 5% -> off is looser -> deferred
-        assert rs.max_consecutive_losses == 2      # 2 -> 3 is looser -> deferred
-        assert rs.pending_json and rs.pending_effective
-    assert 80 not in d.states  # wizard finished
-    assert any("rules are saved" in t.lower() for _, t in sent)
-    assert any("tomorrow" in t.lower() for _, t in sent)  # deferral notice
+    settings.defer_loosening = True  # this test exercises the deferral behavior
+    try:
+        Session = await _session_factory()
+        d, sent, _ = _make_dispatcher(Session)
+        await d.handle(telegram_id=80, username="u", text="/start")
+        await d.handle(telegram_id=80, username="u", text="/setrisk")   # starts wizard
+        await d.handle(telegram_id=80, username="u", text="1")          # trades
+        await d.handle(telegram_id=80, username="u", text="50$")        # daily loss in $
+        await d.handle(telegram_id=80, username="u", text="2")          # risk/trade
+        await d.handle(telegram_id=80, username="u", text="3")          # losses
+        await d.handle(telegram_id=80, username="u", text="skip")       # exposure (keep)
+        async with Session() as s:
+            u = await repo.get_user(s, 80)
+            rs = u.risk_settings
+            # Tightenings apply immediately:
+            assert rs.max_trades_per_day == 1          # 2 -> 1 (stricter)
+            assert rs.max_daily_loss_usd == 50         # off -> 50 (stricter)
+            assert rs.max_risk_per_trade_pct == 2      # 4 -> 2 (stricter)
+            # Loosenings are DEFERRED (active values unchanged, queued as pending):
+            assert rs.max_daily_loss_pct == 5          # 5% -> off is looser -> deferred
+            assert rs.max_consecutive_losses == 2      # 2 -> 3 is looser -> deferred
+            assert rs.pending_json and rs.pending_effective
+        assert 80 not in d.states  # wizard finished
+        assert any("rules are saved" in t.lower() for _, t in sent)
+        assert any("tomorrow" in t.lower() for _, t in sent)  # deferral notice
+    finally:
+        settings.defer_loosening = False
 
 
 async def test_setrisk_wizard_percent_and_invalid_retry():
-    Session = await _session_factory()
-    d, sent, _ = _make_dispatcher(Session)
-    await d.handle(telegram_id=81, username="u", text="/start")
-    await d.handle(telegram_id=81, username="u", text="/setrisk")
-    await d.handle(telegram_id=81, username="u", text="abc")  # invalid trades → re-ask
-    assert any("whole number" in t for _, t in sent)
-    assert d.states[81]["step"] == 0  # still on first step
-    await d.handle(telegram_id=81, username="u", text="2")    # trades ok
-    await d.handle(telegram_id=81, username="u", text="4%")   # daily loss %
-    await d.handle(telegram_id=81, username="u", text="skip") # risk/trade
-    await d.handle(telegram_id=81, username="u", text="skip") # losses
-    await d.handle(telegram_id=81, username="u", text="off")  # exposure off
-    async with Session() as s:
-        u = await repo.get_user(s, 81)
-        assert u.risk_settings.max_daily_loss_pct == 4   # 5% -> 4% (stricter, applies)
-        assert u.risk_settings.max_daily_loss_usd == 0
-        # exposure "off" is a loosening -> deferred; active stays at the default 5.
-        assert u.risk_settings.max_account_exposure_pct == 5
-        assert u.risk_settings.pending_json  # the off-exposure change is queued
+    settings.defer_loosening = True  # this test exercises the deferral behavior
+    try:
+        Session = await _session_factory()
+        d, sent, _ = _make_dispatcher(Session)
+        await d.handle(telegram_id=81, username="u", text="/start")
+        await d.handle(telegram_id=81, username="u", text="/setrisk")
+        await d.handle(telegram_id=81, username="u", text="abc")  # invalid trades → re-ask
+        assert any("whole number" in t for _, t in sent)
+        assert d.states[81]["step"] == 0  # still on first step
+        await d.handle(telegram_id=81, username="u", text="2")    # trades ok
+        await d.handle(telegram_id=81, username="u", text="4%")   # daily loss %
+        await d.handle(telegram_id=81, username="u", text="skip") # risk/trade
+        await d.handle(telegram_id=81, username="u", text="skip") # losses
+        await d.handle(telegram_id=81, username="u", text="off")  # exposure off
+        async with Session() as s:
+            u = await repo.get_user(s, 81)
+            assert u.risk_settings.max_daily_loss_pct == 4   # 5% -> 4% (stricter, applies)
+            assert u.risk_settings.max_daily_loss_usd == 0
+            # exposure "off" is a loosening -> deferred; active stays at the default 5.
+            assert u.risk_settings.max_account_exposure_pct == 5
+            assert u.risk_settings.pending_json  # the off-exposure change is queued
+    finally:
+        settings.defer_loosening = False
 
 
 async def test_admin_broadcast_reaches_all_users():
@@ -416,6 +424,14 @@ async def test_coach_daily_quota():
 
 async def test_risk_change_is_asymmetric():
     """Stricter rule changes apply now; looser ones defer to the next day."""
+    settings.defer_loosening = True
+    try:
+        await _test_risk_change_is_asymmetric_body()
+    finally:
+        settings.defer_loosening = False
+
+
+async def _test_risk_change_is_asymmetric_body():
     Session = await _session_factory()
     async with Session() as s:
         u = await repo.register_user(s, 90, "u")  # defaults: trades=2, losses=2
