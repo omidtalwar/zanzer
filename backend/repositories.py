@@ -163,7 +163,8 @@ async def apply_risk_change(session: AsyncSession, user: User, changes: dict):
                 existing = {}
         existing.update(deferred)
         rs.pending_json = __import__("json").dumps(existing)
-        effective = (_utcnow() + timedelta(days=1)).strftime("%Y-%m-%d")
+        # Looser limits take effect after a delay window (ISO-8601 UTC timestamp).
+        effective = (_utcnow() + timedelta(hours=settings.loosening_delay_hours)).isoformat()
         rs.pending_effective = effective
     await session.commit()
     await session.refresh(rs)
@@ -171,14 +172,21 @@ async def apply_risk_change(session: AsyncSession, user: User, changes: dict):
 
 
 async def promote_pending_risk(session: AsyncSession, rs: RiskSettings) -> bool:
-    """If a pending (looser) change's effective day has arrived, apply it.
+    """If a pending (looser) change's delay window has elapsed, apply it.
     Returns True if something was promoted."""
     if not rs.pending_json or not rs.pending_effective:
         return False
     # When deferral is off (instant mode), apply queued changes right away;
-    # otherwise only once their effective day has arrived.
-    if settings.defer_loosening and rs.pending_effective > _today_str():
-        return False
+    # otherwise only once the delay window has elapsed.
+    if settings.defer_loosening:
+        try:
+            eff = datetime.fromisoformat(rs.pending_effective)
+            if eff.tzinfo is None:
+                eff = eff.replace(tzinfo=timezone.utc)
+        except ValueError:
+            eff = None
+        if eff is not None and _utcnow() < eff:
+            return False
     try:
         pending = __import__("json").loads(rs.pending_json)
     except Exception:  # noqa: BLE001

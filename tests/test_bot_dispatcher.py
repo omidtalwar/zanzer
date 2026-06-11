@@ -292,7 +292,7 @@ async def test_setrisk_wizard_full_flow():
             assert rs.pending_json and rs.pending_effective
         assert 80 not in d.states  # wizard finished
         assert any("rules are saved" in t.lower() for _, t in sent)
-        assert any("tomorrow" in t.lower() for _, t in sent)  # deferral notice
+        assert any("take effect in" in t.lower() for _, t in sent)  # deferral notice
     finally:
         settings.defer_loosening = False
 

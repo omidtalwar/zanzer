@@ -109,10 +109,11 @@ class Settings(BaseSettings):
     # Max /coach calls per user per UTC day (cost protection). 0 = unlimited.
     coach_daily_limit: int = 10
 
-    # Anti-gaming: when True, LOOSENING a risk rule is deferred to the next
-    # trading day (tightening is always instant) so users can't relax limits in
-    # the heat of the moment.
+    # Anti-gaming: when True, LOOSENING a risk rule is deferred (tightening is
+    # always instant) so users can't relax limits in the heat of the moment.
     defer_loosening: bool = True
+    # How long a loosening change waits before it takes effect, in hours.
+    loosening_delay_hours: int = 5
     # A trade whose net P&L is within ±this many units of the account currency
     # is treated as BREAKEVEN (a scratch) — NOT a loss — for the consecutive-loss
     # rule. e.g. 1.0 → a -$0.40 scratch won't extend a losing streak.

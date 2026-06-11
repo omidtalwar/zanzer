@@ -1405,8 +1405,9 @@ class BotDispatcher:
                 "max_consecutive_losses": "losses in a row", "max_account_exposure_pct": "exposure",
             }
             changes = ", ".join(f"{_lbl.get(k, k)} → {v:g}" if isinstance(v, (int, float)) else f"{_lbl.get(k, k)} → {v}" for k, v in pend.items())
+            when = pending_effective[:16].replace("T", " ") + " UTC" if pending_effective else ""
             text += (
-                f"\n⏳ <b>Pending (looser) change</b> takes effect <b>{_esc(pending_effective)}</b>: "
+                f"\n⏳ <b>Pending (looser) change</b> takes effect at <b>{_esc(when)}</b>: "
                 f"{_esc(changes)}\n<i>Loosening is delayed to protect you from emotional changes.</i>\n"
             )
         text += "\n👉 To change them, send /setrisk — tightening applies instantly."
@@ -1507,11 +1508,13 @@ class BotDispatcher:
         ]
         if deferred:
             names = ", ".join(_labels.get(k, k) for k in deferred)
+            hrs = settings.loosening_delay_hours
+            when = (effective[:16].replace("T", " ") + " UTC") if effective else ""
             msg.append(
                 f"\n🛡️ <b>Heads up:</b> you <i>loosened</i> {names}. To protect you "
-                f"from emotional changes, looser limits take effect <b>tomorrow "
-                f"({_esc(effective)})</b>. Until then your current (stricter) limits "
-                f"stay active. Tightening always applies instantly."
+                f"from emotional changes, looser limits take effect in "
+                f"<b>~{hrs}h</b> (at {_esc(when)}). Until then your current (stricter) "
+                f"limits stay active. Tightening always applies instantly."
             )
         msg.append("\n/status")
         await self.send(telegram_id, "\n".join(msg))
