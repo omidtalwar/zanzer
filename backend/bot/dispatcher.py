@@ -1880,9 +1880,30 @@ class BotDispatcher:
                 "(or set AUTO_PROVISION=true).",
             )
             return
-        await self.send(telegram_id, f"⏳ Provisioning terminal for account {_esc(arg)}…")
+        await self.send(telegram_id, f"⏳ Cloning a terminal for account {_esc(arg)}… (this can take a minute)")
         result = await self.provisioner(int(arg))
-        await self.send(telegram_id, f"Done: <code>{_esc(result)}</code>")
+        # Look up login + the provisioned path to give turnkey next steps.
+        async with self._sf() as session:
+            acct = await repo.get_account_by_id(session, int(arg))
+        if acct is None or not acct.terminal_path:
+            await self.send(
+                telegram_id,
+                f"⚠️ Provisioning didn't complete: <code>{_esc(result)}</code>\n"
+                "Check that BASE_TERMINAL_DIR points to a real MT5 install on the VPS.",
+            )
+            return
+        await self.send(
+            telegram_id,
+            f"✅ <b>Terminal ready for account #{acct.id}</b> (login {acct.login})\n"
+            f"📁 <code>{_esc(acct.terminal_path)}</code>\n\n"
+            f"<b>You only need to launch it + log in once:</b>\n"
+            f"1️⃣ On the VPS, run:\n"
+            f"<code>\"{_esc(acct.terminal_path)}\" /portable</code>\n"
+            f"2️⃣ In that MT5 window: File → Login → use <b>/creds {acct.id}</b> for the password\n"
+            f"3️⃣ Tools → Options → Expert Advisors → enable <b>Allow algorithmic trading</b> (button green)\n"
+            f"4️⃣ Leave it running — the worker auto-connects within ~30s.\n\n"
+            f"<i>The folder copy is done for you; you just log in.</i>",
+        )
 
     async def _admin_creds(self, telegram_id, username, arg) -> None:
         """Admin-only: reveal an account's MT5 login/server/broker/password so the
