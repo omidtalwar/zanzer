@@ -199,18 +199,21 @@ async def test_lock_and_user_cannot_self_unlock():
         assert (await repo.get_lock(s, u.id)).locked is True  # still locked
 
 
-async def test_admin_can_unlock_user():
+async def test_nobody_can_unlock_not_even_admin():
+    """Locks can't be removed on demand — not even by an admin (by design)."""
     Session = await _session_factory()
     d, sent, _ = _make_dispatcher(Session)
     settings.bot_admin_ids = str(OWNER)
     try:
         await d.handle(telegram_id=33, username=None, text="/start")
         await d.handle(telegram_id=33, username=None, text="/lock")
+        sent.clear()
         await d.handle(telegram_id=OWNER, username="admin", text="/unlock 33")
+        # The lock must STILL be locked, and the admin is told they can't unlock.
         async with Session() as s:
             u = await repo.get_user(s, 33)
-            assert (await repo.get_lock(s, u.id)).locked is False
-        assert any(cid == 33 for cid, _ in sent)  # user notified
+            assert (await repo.get_lock(s, u.id)).locked is True
+        assert any("not even by an admin" in t.lower() for _, t in sent)
     finally:
         settings.bot_admin_ids = None
 

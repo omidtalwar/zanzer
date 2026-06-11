@@ -131,7 +131,6 @@ _SECTION_TEXT = {
         "/users — list users\n"
         "/accounts — list MT5 accounts\n"
         "/provision &lt;id&gt; — provision a terminal\n"
-        "/unlock &lt;tid&gt; — remove a user's lock\n"
         "/creds &lt;id&gt; — get an account's MT5 login + password (self-deletes)\n"
         "/broadcast &lt;msg&gt; — announce to all users\n"
         "/channelnow — post daily community summary to the channel"
@@ -1590,26 +1589,19 @@ class BotDispatcher:
         )
 
     async def _unlock(self, telegram_id, username, arg) -> None:
-        """Admin-only override. Regular users intentionally cannot self-unlock."""
-        if not self._is_admin(telegram_id):
-            await self.send(
-                telegram_id,
-                "🔒 The lock can't be removed on demand — this is intentional, to "
-                "protect you from emotional trading. It clears at the next trading day.",
-            )
-            return
-        if not arg.isdigit():
-            await self.send(telegram_id, "Usage (admin): /unlock &lt;telegram_id&gt;")
-            return
-        target = int(arg)
-        async with self._sf() as session:
-            user = await repo.get_user(session, target)
-            if user is None:
-                await self.send(telegram_id, "User not found.")
-                return
-            await repo.clear_lock(session, user.id)
-        await self.send(telegram_id, f"🟢 Unlocked {target} (admin override).")
-        await self.send(target, "🟢 Your lock was removed by support.")
+        """Locks can NOT be removed on demand — not even by an admin.
+
+        By design: if the owner could unlock from the bot, the lock would be
+        meaningless (you'd cheat your own discipline). Locks clear automatically
+        at the next trading day. A genuine emergency requires direct server/DB
+        access — deliberately not exposed as a command.
+        """
+        await self.send(
+            telegram_id,
+            "🔒 Locks can't be removed on demand — <b>not even by an admin</b>.\n\n"
+            "This is intentional: it protects you from emotional trading and keeps "
+            "the lock meaningful. It clears automatically at the next trading day.",
+        )
 
     async def _subscribe(self, telegram_id, username, arg) -> None:
         plan = "quarterly" if arg.strip().lower().startswith("q") else "monthly"
