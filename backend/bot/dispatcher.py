@@ -1852,15 +1852,17 @@ class BotDispatcher:
             rows = []
             for a in accounts:
                 emoji = {"active": "🟢", "pending": "🟡", "error": "🔴"}.get(a.status, "•")
+                paid = repo.subscription_is_active(a.user.subscription)
+                sub = "💳 PAID" if paid else "🚫 unpaid"
                 rows.append(
-                    f"{emoji} #{a.id} {a.login}@{_esc(a.server)} "
-                    f"user={a.user.telegram_id} [{_esc(a.status)}]"
+                    f"{emoji} #{a.id} {a.login}@{_esc(a.server)} — {sub}\n"
+                    f"     user={a.user.telegram_id} · status [{_esc(a.status)}]"
                 )
         await self.send(
             telegram_id,
             "<b>MT5 accounts</b>\n" + ("\n".join(rows) if rows else "(none)") +
-            "\n\n<i>Status flips to 🟢 active when its worker connects "
-            "(start: python -m backend.run_account &lt;id&gt;).</i>",
+            "\n\n<i>💳 PAID = subscription active (connect these). "
+            "Use /creds &lt;id&gt; to get login details.</i>",
         )
 
     async def _admin_provision(self, telegram_id, username, arg) -> None:

@@ -356,7 +356,9 @@ async def set_account_status(
 
 async def list_all_accounts(session: AsyncSession) -> list[MT5Account]:
     result = await session.execute(
-        select(MT5Account).options(selectinload(MT5Account.user)).order_by(MT5Account.id)
+        select(MT5Account).options(
+            selectinload(MT5Account.user).selectinload(User.subscription)
+        ).order_by(MT5Account.id)
     )
     return list(result.scalars().all())
 
