@@ -685,14 +685,15 @@ async def get_journal_for_trade(
 
 
 async def get_today_trades_with_journals(
-    session: AsyncSession, user_id: int, date_str: str
+    session: AsyncSession, user_id: int, since: "datetime"
 ) -> tuple[list[Trade], list[TradeJournal]]:
-    """Return today's trades and all their journals for the psychology engine."""
+    """Return TODAY's trades (opened at/after `since`) and their journals for the
+    psychology engine. `since` is the broker server-day midnight so the emotion
+    score resets each trading day instead of dragging in yesterday's losses."""
     result = await session.execute(
         select(Trade).where(
             Trade.user_id == user_id,
-            Trade.opened_at >= _utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-            - __import__("datetime").timedelta(days=1),
+            Trade.opened_at >= since,
         ).order_by(Trade.opened_at)
     )
     trades = list(result.scalars().all())
@@ -769,6 +770,21 @@ async def get_emotion_score(
             EmotionScore.user_id == user_id,
             EmotionScore.date == date_str,
         )
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_latest_emotion_score(
+    session: AsyncSession, user_id: int
+) -> EmotionScore | None:
+    """The most-recently-updated score row — i.e. today's, regardless of the
+    UTC-vs-broker-day date key. Used by /status and /today so the display always
+    reflects the current trading day."""
+    result = await session.execute(
+        select(EmotionScore)
+        .where(EmotionScore.user_id == user_id)
+        .order_by(EmotionScore.updated_at.desc())
+        .limit(1)
     )
     return result.scalar_one_or_none()
 

@@ -426,9 +426,7 @@ class BotDispatcher:
             lock = await repo.get_lock(session, user.id)
             snap = await repo.get_snapshot(session, user.id)
             unjournaled = await repo.get_unjournaled_trades(session, user.id)
-            from datetime import timezone as _tz
-            today_str = datetime.now(tz=_tz.utc).strftime("%Y-%m-%d")
-            emotion_row = await repo.get_emotion_score(session, user.id, today_str)
+            emotion_row = await repo.get_latest_emotion_score(session, user.id)
         lines = [
             "<b>📊 Your Status</b>",
             f"Subscription: <b>{'active' if active else 'inactive'}</b> ({_esc(user.subscription.status)})",
@@ -566,7 +564,7 @@ class BotDispatcher:
                 return
             today_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
             snap = await repo.get_snapshot(session, user.id)
-            emotion_row = await repo.get_emotion_score(session, user.id, today_str)
+            emotion_row = await repo.get_latest_emotion_score(session, user.id)
             trades = await repo.get_trades_in_range(
                 session, user.id,
                 since=datetime.now(tz=timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0),

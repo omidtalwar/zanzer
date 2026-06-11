@@ -317,9 +317,9 @@ class AccountWorker:
                         + self._exit_prompt(trade, pos_data)
                     )
 
-    async def _run_psychology_cycle(self, session, server_date: str) -> None:
+    async def _run_psychology_cycle(self, session, server_date: str, since) -> None:
         """Compute today's emotion score, persist it, auto-lock if < threshold."""
-        trades, journals = await repo.get_today_trades_with_journals(session, self.user_id, server_date)
+        trades, journals = await repo.get_today_trades_with_journals(session, self.user_id, since)
 
         trade_dicts = [
             {
@@ -441,9 +441,14 @@ class AccountWorker:
         # V4 — psychology engine: score + revenge detection + auto-lock.
         try:
             offset = self.broker.get_server_offset()
-            server_date = (datetime.now(tz=timezone.utc) + offset).strftime("%Y-%m-%d")
+            server_now = datetime.now(tz=timezone.utc) + offset
+            server_date = server_now.strftime("%Y-%m-%d")
+            # Server-day midnight — the trading-day boundary. Trade.opened_at is in
+            # the same (server-as-UTC) frame, so this selects only today's trades
+            # and the emotion score resets each day.
+            server_midnight = server_now.replace(hour=0, minute=0, second=0, microsecond=0)
             async with self._session_factory() as session:
-                await self._run_psychology_cycle(session, server_date)
+                await self._run_psychology_cycle(session, server_date, server_midnight)
         except Exception as exc:  # noqa: BLE001
             log.warning("psychology cycle error for user %s: %s", self.user_id, exc)
 
