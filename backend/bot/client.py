@@ -50,6 +50,23 @@ async def send_message(chat_id: int | str, text: str, parse_mode: str = "HTML",
     return True
 
 
+async def send_message_id(chat_id: int | str, text: str, parse_mode: str = "HTML") -> int | None:
+    """Like send_message but returns the sent message_id (for later deletion).
+    Used for sensitive messages (e.g. credentials) that should self-delete."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(f"{_base()}/sendMessage", json={
+                "chat_id": chat_id, "text": text, "parse_mode": parse_mode,
+                "disable_web_page_preview": True,
+            })
+        data = resp.json()
+        if data.get("ok"):
+            return data["result"].get("message_id")
+    except httpx.HTTPError as exc:
+        log.error("send_message_id error: %s", exc)
+    return None
+
+
 async def edit_message_text(chat_id: int | str, message_id: int, text: str,
                             parse_mode: str = "HTML", reply_markup: dict | None = None) -> bool:
     """Edit an existing message in place (used for inline-menu navigation)."""

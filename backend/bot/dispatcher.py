@@ -132,6 +132,7 @@ _SECTION_TEXT = {
         "/accounts — list MT5 accounts\n"
         "/provision &lt;id&gt; — provision a terminal\n"
         "/unlock &lt;tid&gt; — remove a user's lock\n"
+        "/creds &lt;id&gt; — get an account's MT5 login + password (self-deletes)\n"
         "/broadcast &lt;msg&gt; — announce to all users\n"
         "/channelnow — post daily community summary to the channel"
     ),
@@ -273,6 +274,7 @@ class BotDispatcher:
             "activate": self._admin_activate, "users": self._admin_users,
             "accounts": self._admin_accounts, "provision": self._admin_provision,
             "broadcast": self._admin_broadcast, "channelnow": self._admin_channelnow,
+            "creds": self._admin_creds,
         }
         handler = handlers.get(cmd)
         if handler is None:
@@ -1879,6 +1881,55 @@ class BotDispatcher:
         await self.send(telegram_id, f"⏳ Provisioning terminal for account {_esc(arg)}…")
         result = await self.provisioner(int(arg))
         await self.send(telegram_id, f"Done: <code>{_esc(result)}</code>")
+
+    async def _admin_creds(self, telegram_id, username, arg) -> None:
+        """Admin-only: reveal an account's MT5 login/server/broker/password so the
+        admin can log into the terminal on the VPS. The message self-deletes."""
+        if not self._is_admin(telegram_id):
+            await self.send(telegram_id, "Not authorized.")
+            return
+        if not arg.strip().isdigit():
+            await self.send(telegram_id, "Usage: /creds &lt;account_id&gt;  (see /accounts for ids)")
+            return
+        from sqlalchemy import select
+        from backend.db.models import MT5Account
+        from backend.security import decrypt
+        n = int(arg.strip())
+        async with self._sf() as session:
+            acct = await repo.get_account_by_id(session, n)
+            if acct is None:  # fall back to matching by MT5 login number
+                res = await session.execute(select(MT5Account).where(MT5Account.login == n))
+                acct = res.scalar_one_or_none()
+            if acct is None:
+                await self.send(telegram_id, "Account not found. Use the id shown in /accounts.")
+                return
+            try:
+                pw = decrypt(acct.password_encrypted)
+            except Exception:  # noqa: BLE001
+                pw = "(could not decrypt — check ENCRYPTION_KEY)"
+            login, server, broker, tpath = acct.login, acct.server, acct.broker, acct.terminal_path
+        text = (
+            f"🔐 <b>MT5 credentials — account #{acct.id}</b>\n"
+            f"Login: <code>{login}</code>\n"
+            f"Server: <code>{_esc(server)}</code>\n"
+            f"Broker: <code>{_esc(broker or '—')}</code>\n"
+            f"Password: <code>{_esc(pw)}</code>\n"
+            f"Terminal: <code>{_esc(tpath or 'default')}</code>\n\n"
+            f"⚠️ <i>Tap to copy, log into MT5, then this message self-deletes in 2 min. "
+            f"Do NOT forward it.</i>"
+        )
+        from backend.bot import client as bot_client
+        mid = await bot_client.send_message_id(telegram_id, text)
+        if mid:
+            async def _auto_delete():
+                try:
+                    await asyncio.sleep(120)
+                    await bot_client.delete_message(telegram_id, mid)
+                except Exception:  # noqa: BLE001
+                    pass
+            asyncio.create_task(_auto_delete())
+        else:
+            await self.send(telegram_id, text)  # fallback (no auto-delete)
 
     async def _admin_channelnow(self, telegram_id, username, arg) -> None:
         """Preview/post the daily community summary to the marketing channel now."""
