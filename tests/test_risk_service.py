@@ -39,7 +39,15 @@ def test_trade_count_counts_only_opens():
     deals = [_deal(1, "IN"), _deal(1, "OUT", profit=-5), _deal(2, "IN")]
     r = compute_risk_status(_account(), deals)
     assert r.trades_today == 2          # two opens
-    assert r.daily_trade_limit_hit       # default max is 2
+    assert not r.daily_trade_limit_hit   # 2/2 is allowed (limit = max allowed)
+
+
+def test_trade_limit_breaches_on_the_next_trade():
+    # 3 opens with default max 2 -> the 3rd is the violation (3/2).
+    deals = [_deal(1, "IN"), _deal(2, "IN"), _deal(3, "IN")]
+    r = compute_risk_status(_account(), deals)
+    assert r.trades_today == 3
+    assert r.daily_trade_limit_hit       # 3/2 breaches
 
 
 def test_daily_loss_realized_plus_floating():

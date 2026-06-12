@@ -104,7 +104,9 @@ def compute_risk_status(
         max_consecutive_losses=limits.max_consecutive_losses,
         exposure_pct=round(exposure_pct, 2),
         max_account_exposure_pct=limits.max_account_exposure_pct,
-        daily_trade_limit_hit=trades_today >= limits.max_trades_per_day,
+        # The limit is the number of ALLOWED trades: N/N is fine, the (N+1)th
+        # trade is the violation (so 2/2 = OK, 3/2 = breach → warn + close).
+        daily_trade_limit_hit=trades_today > limits.max_trades_per_day,
         daily_loss_limit_hit=daily_loss_limit_hit,
         consecutive_loss_limit_hit=consecutive >= limits.max_consecutive_losses,
         exposure_limit_hit=exposure_pct >= limits.max_account_exposure_pct,
