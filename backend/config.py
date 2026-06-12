@@ -108,6 +108,11 @@ class Settings(BaseSettings):
     ai_coach_enabled: bool = True
     # Max /coach calls per user per UTC day (cost protection). 0 = unlimited.
     coach_daily_limit: int = 10
+    # AI recommendation digest: UTC hours to send each user a personalised
+    # recommendation based on their journal data (comma-separated). Blank = off.
+    ai_reco_hours_utc: str = "8,20"
+    # How many days of journal history to feed the recommendation.
+    ai_reco_lookback_days: int = 14
 
     # Anti-gaming: when True, LOOSENING a risk rule is deferred (tightening is
     # always instant) so users can't relax limits in the heat of the moment.

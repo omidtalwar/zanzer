@@ -110,6 +110,56 @@ def build_review_context(
     return "\n".join(lines)
 
 
+def build_reco_context(trades: list[dict], journals: list[dict], period_label: str) -> str:
+    """Compact summary of the trader's recent trades+journals for recommendations.
+
+    `trades` items: symbol, profit, session, exit_reason, entry_timeframe,
+                    duration_s, status.
+    `journals` items: type, setup_reason (strategy), mistakes, lesson, skipped.
+    """
+    closed = [t for t in trades if t.get("profit") is not None]
+    lines = [f"PERIOD: {period_label}", f"Trades: {len(closed)}", ""]
+
+    def _bucket(key: str):
+        agg: dict[str, list[float]] = {}
+        for t in closed:
+            k = t.get(key) or "—"
+            agg.setdefault(k, []).append(t.get("profit") or 0.0)
+        out = []
+        for k, pnls in sorted(agg.items(), key=lambda kv: -sum(kv[1])):
+            wins = sum(1 for p in pnls if p > 0)
+            out.append(f"  {k}: {len(pnls)} trades, {wins}/{len(pnls)} wins, net {sum(pnls):+.2f}")
+        return out
+
+    if closed:
+        lines.append("BY SESSION:")
+        lines += _bucket("session")
+        lines.append("BY TIMEFRAME:")
+        lines += _bucket("entry_timeframe")
+        # Exit reason mix.
+        reasons: dict[str, int] = {}
+        for t in closed:
+            reasons[t.get("exit_reason") or "—"] = reasons.get(t.get("exit_reason") or "—", 0) + 1
+        lines.append("EXITS: " + ", ".join(f"{k}×{v}" for k, v in reasons.items()))
+
+    strategies = [j.get("setup_reason") for j in journals if j.get("type") == "entry" and j.get("setup_reason")]
+    mistakes = [j.get("mistakes") for j in journals if j.get("mistakes")]
+    lessons = [j.get("lesson") for j in journals if j.get("lesson")]
+    if strategies:
+        lines.append("\nSTRATEGIES USED:")
+        for s in strategies[:8]:
+            lines.append(f"  • {s}")
+    if mistakes:
+        lines.append("MISTAKES LOGGED:")
+        for m in mistakes[:8]:
+            lines.append(f"  • {m}")
+    if lessons:
+        lines.append("LESSONS LOGGED:")
+        for ln in lessons[:8]:
+            lines.append(f"  • {ln}")
+    return "\n".join(lines)
+
+
 _USER_PREFIX = (
     "Here is my trading data for the period. Coach me on my discipline and "
     "psychology — what I did well, my repeated mistakes, and how to improve. "
@@ -117,66 +167,92 @@ _USER_PREFIX = (
 )
 
 
-async def generate_review(context: str, ai_config: dict) -> str:
-    """Produce the coaching review using the admin-configured provider.
+RECO_SYSTEM = (
+    "You are Hermes, the discipline & psychology coach inside Zanzer. Based on "
+    "the trader's OWN recent journal data, give a short personalised recommendation "
+    "for their NEXT sessions.\n\n"
+    "STRICT RULES:\n"
+    "- NEVER suggest entries, exits, signals, price targets, or what instrument to trade.\n"
+    "- NEVER give financial advice.\n"
+    "- Recommend based on THEIR patterns: which sessions/timeframes worked, repeated "
+    "mistakes to avoid, lessons to repeat, and habits to fix.\n\n"
+    "OUTPUT (Telegram, SHORT, max ~90 words, plain text, no markdown):\n"
+    "- One-line headline of the biggest pattern.\n"
+    "- '✅ Keep doing:' 1-2 bullets.\n"
+    "- '⚠️ Fix:' 1-2 bullets.\n"
+    "- '🎯 Next session:' 1-2 concrete behavioural actions.\n"
+    "Reference their real numbers. Be direct and warm."
+)
 
-    `ai_config` is the dict from repositories.get_ai_config (provider,
-    active_key, active_model, available). Returns text or a friendly error.
-    """
+_RECO_PREFIX = (
+    "Here is my recent trading journal data. Give me a personalised recommendation "
+    "for my next sessions based on my patterns. Do NOT tell me what to trade.\n\n"
+)
+
+
+async def generate_review(context: str, ai_config: dict) -> str:
+    """Coaching review (the /coach command)."""
+    return await _generate(context, ai_config, SYSTEM_PROMPT, _USER_PREFIX)
+
+
+async def generate_recommendation(context: str, ai_config: dict) -> str:
+    """Personalised next-session recommendation (the 2x-daily digest, /reco)."""
+    return await _generate(context, ai_config, RECO_SYSTEM, _RECO_PREFIX)
+
+
+async def _generate(context: str, ai_config: dict, system: str, user_prefix: str) -> str:
+    """Call the admin-configured provider. Returns text or a friendly error."""
     if not ai_config.get("available"):
         return (
-            "⚠️ The AI coach isn't configured yet. An admin can enable it from "
-            "the dashboard (set a provider + API key)."
+            "⚠️ The AI isn't configured yet. An admin can enable it from the "
+            "dashboard (set a provider + API key)."
         )
     provider = ai_config.get("provider", "openai")
     try:
         if provider == "claude":
-            return await _generate_claude(context, ai_config)
-        return await _generate_openai(context, ai_config)
+            return await _generate_claude(context, ai_config, system, user_prefix)
+        return await _generate_openai(context, ai_config, system, user_prefix)
     except ModuleNotFoundError as exc:
         pkg = "anthropic" if provider == "claude" else "openai"
-        log.error("AI coach package missing (%s): %s", pkg, exc)
+        log.error("AI package missing (%s): %s", pkg, exc)
         return (
-            f"⚠️ The AI coach can't run — the <b>{pkg}</b> package isn't installed "
-            f"in the Python running this service.\n"
-            f"Fix: <code>pip install {pkg}</code> (in the same interpreter that "
-            f"runs the service), then restart."
+            f"⚠️ The AI can't run — the <b>{pkg}</b> package isn't installed in the "
+            f"Python running this service. Fix: <code>pip install {pkg}</code>, then restart."
         )
     except Exception as exc:  # noqa: BLE001
-        log.error("%s coach call failed: %s", provider, exc)
+        log.error("%s AI call failed: %s", provider, exc)
         return (
-            "⚠️ I couldn't reach the AI coach right now. Please try again later.\n"
+            "⚠️ I couldn't reach the AI right now. Please try again later.\n"
             f"<i>({type(exc).__name__})</i>"
         )
 
 
-async def _generate_openai(context: str, ai_config: dict) -> str:
+async def _generate_openai(context: str, ai_config: dict, system: str, user_prefix: str) -> str:
     from openai import AsyncOpenAI
 
     client = AsyncOpenAI(api_key=ai_config["active_key"])
     resp = await client.chat.completions.create(
         model=ai_config["active_model"],
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": _USER_PREFIX + context},
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_prefix + context},
         ],
         temperature=0.6,
-        max_tokens=280,
+        max_tokens=300,
     )
     return resp.choices[0].message.content.strip()
 
 
-async def _generate_claude(context: str, ai_config: dict) -> str:
+async def _generate_claude(context: str, ai_config: dict, system: str, user_prefix: str) -> str:
     from anthropic import AsyncAnthropic
 
     client = AsyncAnthropic(api_key=ai_config["active_key"])
     resp = await client.messages.create(
         model=ai_config["active_model"],
-        max_tokens=280,
+        max_tokens=300,
         temperature=0.6,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": _USER_PREFIX + context}],
+        system=system,
+        messages=[{"role": "user", "content": user_prefix + context}],
     )
-    # Concatenate any text blocks in the response.
     parts = [b.text for b in resp.content if getattr(b, "type", None) == "text"]
     return "".join(parts).strip()

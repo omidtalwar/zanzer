@@ -111,7 +111,8 @@ _SECTION_TEXT = {
         "📓 <b>Journal &amp; Coaching</b>\n"
         "/journal — view / fill trade journals\n"
         "/trades — recent trade history\n"
-        "/coach — AI psychology review 🤖"
+        "/coach — AI psychology review 🤖\n"
+        "/reco — AI recommendation from your data 🤖"
     ),
     "settings": (
         "⚙️ <b>Settings</b>\n"
@@ -270,7 +271,7 @@ class BotDispatcher:
             "today": self._today, "yesterday": self._yesterday,
             "weekly": self._weekly, "performance": self._performance,
             "trades": self._trades, "journal": self._journal, "explain": self._explain,
-            "coach": self._coach, "monthly": self._monthly,
+            "coach": self._coach, "monthly": self._monthly, "reco": self._reco,
             "link": self._link_start, "risk": self._risk, "setrisk": self._setrisk,
             "lock": self._lock, "unlock": self._unlock, "subscribe": self._subscribe,
             "paid": self._paid, "stars": self._stars,
@@ -910,6 +911,33 @@ class BotDispatcher:
             "<i>This is reflection on your past behaviour, not financial advice. "
             "I never tell you what to trade.</i>",
         )
+
+    # ------------------------------------------------------------------ /reco
+    async def _reco(self, telegram_id, username, arg) -> None:
+        """On-demand personalised recommendation (same engine as the 2x-daily digest)."""
+        if not self._coach_quota_ok(telegram_id):
+            await self.send(
+                telegram_id,
+                f"🤖 You've reached today's AI limit ({settings.coach_daily_limit}/day). "
+                "Your daily recommendations still arrive automatically.",
+            )
+            return
+        await self.send(telegram_id, "🤖 <i>Building your recommendation from your journal…</i>")
+        from backend import recommendations as reco
+        async with self._sf() as session:
+            user = await repo.get_user(session, telegram_id)
+            if user is None:
+                await self.send(telegram_id, "Send /start first.")
+                return
+            text = await reco.build_for_user(session, user)
+        if text is None:
+            await self.send(
+                telegram_id,
+                "🤖 Not enough journal data yet — take a few trades and journal them, "
+                "then I can recommend based on your patterns.",
+            )
+            return
+        await self.send(telegram_id, text)
 
     # ---------------------------------------------------------------- /monthly
     async def _monthly(self, telegram_id, username, arg) -> None:
