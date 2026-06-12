@@ -499,17 +499,55 @@ async def open_trade(
     session: AsyncSession, user_id: int, *,
     ticket: int, symbol: str, direction: str, volume: float,
     entry_price: float, sl: float | None, tp: float | None, opened_at: datetime,
+    gated: bool = False,
 ) -> Trade:
     trade = Trade(
         user_id=user_id, ticket=ticket, symbol=symbol,
         direction=direction, volume=volume, entry_price=entry_price,
         sl=sl, tp=tp, opened_at=opened_at, status="open",
         entry_prompted_at=_utcnow(),
+        gate_status="pending" if gated else "passed",
     )
     session.add(trade)
     await session.commit()
     await session.refresh(trade)
     return trade
+
+
+# --- Pre-trade gate -------------------------------------------------------
+
+async def set_trade_gate(
+    session: AsyncSession, trade: Trade, *,
+    entry_timeframe: str | None = None, used_tradingview: bool | None = None,
+    gate_status: str | None = None, close_requested: bool | None = None,
+) -> Trade:
+    if entry_timeframe is not None:
+        trade.entry_timeframe = entry_timeframe
+    if used_tradingview is not None:
+        trade.used_tradingview = used_tradingview
+    if gate_status is not None:
+        trade.gate_status = gate_status
+    if close_requested is not None:
+        trade.close_requested = close_requested
+    await session.commit()
+    await session.refresh(trade)
+    return trade
+
+
+async def get_pending_gate_trades(session: AsyncSession, user_id: int) -> list[Trade]:
+    """Trades whose gate is still unanswered (for timeout checks)."""
+    result = await session.execute(
+        select(Trade).where(Trade.user_id == user_id, Trade.gate_status == "pending")
+    )
+    return list(result.scalars().all())
+
+
+async def get_close_requested_trades(session: AsyncSession, user_id: int) -> list[Trade]:
+    """Trades the gate flagged for closing (worker acts on these)."""
+    result = await session.execute(
+        select(Trade).where(Trade.user_id == user_id, Trade.close_requested.is_(True))
+    )
+    return list(result.scalars().all())
 
 
 async def close_trade(
@@ -546,6 +584,8 @@ async def get_unjournaled_trades(session: AsyncSession, user_id: int) -> list[Tr
         select(Trade).where(
             Trade.user_id == user_id,
             Trade.status.in_(["open", "closed"]),
+            # Only gate-passed trades get journaled; pending/failed gates aren't.
+            Trade.gate_status == "passed",
         ).order_by(Trade.opened_at.desc())
     )
     trades = list(result.scalars().all())

@@ -15,6 +15,12 @@ from backend.db import models  # noqa: F401
 from backend.models import RiskLimits
 from backend.worker import AccountWorker
 
+from backend.config import settings as _settings
+# These tests exercise enforcement/journal, not the pre-trade gate. Disable the
+# gate by default so opening a position doesn't fire the gate prompt; the gate
+# has its own dedicated test that re-enables it.
+_settings.pretrade_gate_enabled = False
+
 LIMITS = RiskLimits(
     max_trades_per_day=2, max_daily_loss_pct=5.0, max_risk_per_trade_pct=4.0,
     max_consecutive_losses=2, max_account_exposure_pct=5.0,
@@ -152,6 +158,45 @@ async def test_algo_disabled_alerts_user():
         assert any("Algo Trading" in t and "not protected" in t.lower() for t in sent), sent
     finally:
         settings.enforcement_mode = "dry_run"
+
+
+async def test_pretrade_gate_times_out_and_closes():
+    """A gated trade not confirmed within the window is closed by the worker."""
+    _settings.pretrade_gate_enabled = True
+    _settings.gate_timeout_seconds = 0   # immediate timeout for the test
+    _settings.enforcement_mode = "live"
+    try:
+        from datetime import datetime, timezone
+        from backend.models import OpenPosition
+        Session = await _session_factory()
+        uid = await _new_user(Session)
+        positions = [OpenPosition(ticket=7, symbol="EURUSD", direction="SELL", volume=0.01,
+                                  price_open=1.15, price_current=1.15, sl=0, tp=0, profit=0,
+                                  time=datetime.now(timezone.utc))]
+        broker = MockBrokerClient(make_account(balance=1000, equity=1000), positions=positions)
+        sent: list[str] = []
+        kb_sent: list = []
+
+        async def notify(t):
+            sent.append(t); return True
+
+        async def send_kb(text, kb):
+            kb_sent.append((text, kb)); return True
+
+        worker = AccountWorker(broker, user_id=uid, telegram_id=900, limits=LIMITS,
+                               notify=notify, send_kb=send_kb, session_factory=Session)
+        await worker.run_once()
+        # The gate prompt (with a timeframe keyboard) was sent.
+        assert kb_sent and "timeframe" in kb_sent[0][0].lower()
+        # It timed out (0s) and the worker closed the position.
+        assert 7 in broker.closed_tickets
+        async with Session() as s:
+            t = await repo.get_trade_by_ticket(s, uid, 7)
+            assert t.status == "gate_closed" and t.gate_status == "failed"
+    finally:
+        _settings.pretrade_gate_enabled = False
+        _settings.gate_timeout_seconds = 120
+        _settings.enforcement_mode = "dry_run"
 
 
 async def _run():

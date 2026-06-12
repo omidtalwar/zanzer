@@ -114,6 +114,14 @@ class Settings(BaseSettings):
     defer_loosening: bool = True
     # How long a loosening change waits before it takes effect, in hours.
     loosening_delay_hours: int = 5
+
+    # --- Pre-trade gate (qualifying questions before a trade is allowed) ---
+    # When on, each new trade must pass quick questions (timeframe ≠ 1m, used
+    # TradingView) within the timeout, or the worker closes it.
+    pretrade_gate_enabled: bool = True
+    gate_timeout_seconds: int = 120
+    # Timeframe answer that fails the gate (comma-separated).
+    gate_blocked_timeframes: str = "1m"
     # A trade whose net P&L is within ±this many units of the account currency
     # is treated as BREAKEVEN (a scratch) — NOT a loss — for the consecutive-loss
     # rule. e.g. 1.0 → a -$0.40 scratch won't extend a losing streak.

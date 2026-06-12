@@ -52,7 +52,11 @@ _SQLITE_COLUMN_ADDS = [
     ("locks", "explanation", "ALTER TABLE locks ADD COLUMN explanation TEXT"),
     ("trades", "screenshot_file_id", "ALTER TABLE trades ADD COLUMN screenshot_file_id VARCHAR(256)"),
     ("risk_settings", "pending_json", "ALTER TABLE risk_settings ADD COLUMN pending_json TEXT"),
-    ("risk_settings", "pending_effective", "ALTER TABLE risk_settings ADD COLUMN pending_effective VARCHAR(10)"),
+    ("risk_settings", "pending_effective", "ALTER TABLE risk_settings ADD COLUMN pending_effective VARCHAR(40)"),
+    ("trades", "gate_status", "ALTER TABLE trades ADD COLUMN gate_status VARCHAR(12) DEFAULT 'passed'"),
+    ("trades", "entry_timeframe", "ALTER TABLE trades ADD COLUMN entry_timeframe VARCHAR(8)"),
+    ("trades", "used_tradingview", "ALTER TABLE trades ADD COLUMN used_tradingview BOOLEAN"),
+    ("trades", "close_requested", "ALTER TABLE trades ADD COLUMN close_requested BOOLEAN DEFAULT 0"),
     # V3/V4 — emotion_scores and trade journal tables created by create_all on first run.
 ]
 

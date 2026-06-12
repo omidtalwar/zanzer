@@ -209,10 +209,17 @@ class Trade(Base):
     exit_prompted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     entry_reminder_count: Mapped[int] = mapped_column(Integer, default=0)
     exit_reminder_count: Mapped[int] = mapped_column(Integer, default=0)
-    # open | closed | entry_skipped | exit_skipped
+    # open | closed | entry_skipped | exit_skipped | gate_closed
     status: Mapped[str] = mapped_column(String(24), default="open")
     # Telegram file_id of a chart screenshot the trader attached (optional).
     screenshot_file_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # Pre-trade gate (V4.1): qualifying questions answered before the trade is
+    # allowed to stand. Default 'passed' so pre-existing trades are never gated.
+    gate_status: Mapped[str] = mapped_column(String(12), default="passed")  # passed | pending | failed
+    entry_timeframe: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    used_tradingview: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Set when the gate fails/times out; the worker closes the position next cycle.
+    close_requested: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 

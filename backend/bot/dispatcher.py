@@ -61,6 +61,12 @@ _BACK_KB = _ik([[("⬅️ Back to menu", "m:home")]])
 
 _BACK_ROW = [("⬅️ Back to menu", "m:home")]
 
+
+def _gate_tv_keyboard(trade_id: int) -> dict:
+    """Yes/No keyboard for the 'did you use TradingView?' gate question."""
+    return _ik([[("✅ Yes", f"gate:tv:yes:{trade_id}"),
+                 ("❌ No", f"gate:tv:no:{trade_id}")]])
+
 # Per-section keyboards: tappable buttons that RUN the command (callback "c:<cmd>").
 _SECTION_KB = {
     "perf": _ik([
@@ -375,6 +381,11 @@ class BotDispatcher:
 
         kind, _, key = data.partition(":")
 
+        # Pre-trade gate answers.
+        if kind == "gate":
+            await self._handle_gate_callback(telegram_id, data, message_id)
+            return
+
         # Direct command buttons.
         if kind == "c":
             await self._run_command_button(telegram_id, username, key)
@@ -412,6 +423,76 @@ class BotDispatcher:
             await self.send(telegram_id, "Unknown action. /menu")
             return
         await handler(telegram_id, username, "")
+
+    async def _gate_edit(self, telegram_id, message_id, text, reply_markup=None) -> None:
+        """Replace the gate message (removing/replacing its buttons)."""
+        if self.edit and message_id is not None:
+            if await self.edit(telegram_id, message_id, text, reply_markup=reply_markup):
+                return
+        await self.send(telegram_id, text)
+
+    async def _handle_gate_callback(self, telegram_id: int, data: str, message_id) -> None:
+        """Pre-trade gate button taps: gate:tf:<value>:<trade_id> / gate:tv:<yes|no>:<trade_id>.
+
+        Records the answer; a failing answer flags the trade for the worker to
+        close; passing both questions starts the entry journal.
+        """
+        parts = data.split(":")
+        if len(parts) < 4 or not parts[3].isdigit():
+            return
+        field, value, trade_id = parts[1], parts[2], int(parts[3])
+
+        async with self._sf() as session:
+            user = await repo.get_user(session, telegram_id)
+            trade = await repo.get_trade_by_id(session, trade_id)
+            if user is None or trade is None or trade.user_id != user.id:
+                return
+            if trade.gate_status != "pending":
+                await self._gate_edit(telegram_id, message_id, "✅ This trade's check is already done.")
+                return
+
+            if field == "tf":
+                await repo.set_trade_gate(session, trade, entry_timeframe=value)
+                blocked = [t.strip().lower() for t in settings.gate_blocked_timeframes.split(",")]
+                if value.lower() in blocked:
+                    await repo.set_trade_gate(session, trade, gate_status="failed", close_requested=True)
+                    await self._gate_edit(
+                        telegram_id, message_id,
+                        f"❌ <b>{_esc(value)} timeframe isn't allowed.</b>\n"
+                        f"This trade will be closed — scalping the 1-minute is exactly the "
+                        f"impulsive behaviour ZanZer protects you from.",
+                    )
+                else:
+                    await self._gate_edit(
+                        telegram_id, message_id,
+                        f"✅ Timeframe: <b>{_esc(value)}</b>\n\n"
+                        f"<b>2/2 — Did you analyse this on TradingView?</b>",
+                        reply_markup=_gate_tv_keyboard(trade_id),
+                    )
+                return
+
+            if field == "tv":
+                used = value == "yes"
+                await repo.set_trade_gate(session, trade, used_tradingview=used)
+                if not used:
+                    await repo.set_trade_gate(session, trade, gate_status="failed", close_requested=True)
+                    await self._gate_edit(
+                        telegram_id, message_id,
+                        "❌ <b>Analysis must be done on TradingView.</b>\n"
+                        "This trade will be closed. Do your analysis first, then enter.",
+                    )
+                    return
+                await repo.set_trade_gate(session, trade, gate_status="passed")
+
+        # Gate passed → start the entry journal (outside the session above).
+        self.states[telegram_id] = {"flow": "entry_journal", "step": 0, "trade_id": trade_id, "data": {}}
+        await self._gate_edit(
+            telegram_id, message_id,
+            "✅ <b>Gate passed</b> — trade approved.\n\n"
+            "📝 <b>Entry Journal (1/4)</b>\n"
+            "What's your setup / reason for this trade?\n"
+            "<i>(e.g. London breakout, support bounce, trend continuation)</i>",
+        )
 
     async def _status(self, telegram_id, username, arg) -> None:
         async with self._sf() as session:

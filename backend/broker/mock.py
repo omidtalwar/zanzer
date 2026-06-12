@@ -21,6 +21,7 @@ class MockBrokerClient:
         self._positions = positions or []
         self._deals = deals or []
         self.close_all_calls = 0
+        self.closed_tickets: list[int] = []
 
     def get_account_info(self) -> AccountInfo:
         return self._account
@@ -42,6 +43,11 @@ class MockBrokerClient:
         closed = [f"closed {p.symbol} {p.volume}" for p in self._positions]
         self._positions = []
         return closed
+
+    def close_position(self, ticket: int) -> str:
+        self.closed_tickets.append(ticket)
+        self._positions = [p for p in self._positions if p.ticket != ticket]
+        return f"closed position {ticket}"
 
 
 def make_account(balance: float = 1000.0, equity: float | None = None,

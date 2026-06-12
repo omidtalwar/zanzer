@@ -49,6 +49,17 @@ log = get_logger("worker")
 NotifyFn = Callable[[str], Awaitable[bool]]
 
 
+def _gate_tf_keyboard(trade_id: int) -> dict:
+    """Inline keyboard of timeframe choices for the pre-trade gate."""
+    rows = [["1m", "5m", "15m"], ["30m", "1H", "4H"], ["Daily"]]
+    return {
+        "inline_keyboard": [
+            [{"text": tf, "callback_data": f"gate:tf:{tf}:{trade_id}"} for tf in row]
+            for row in rows
+        ]
+    }
+
+
 def _trading_session(hour: int) -> str:
     """Forex session name from UTC hour of trade entry."""
     sessions = []
@@ -112,6 +123,7 @@ class AccountWorker:
         limits: RiskLimits,
         account_id: int | None = None,
         notify: NotifyFn | None = None,
+        send_kb=None,
         session_factory=SessionLocal,
     ) -> None:
         self.broker = broker
@@ -121,6 +133,8 @@ class AccountWorker:
         self.account_id = account_id
         # Default: send to THIS user's Telegram chat (multi-user correct).
         self.notify = notify or self._notify_user
+        # send_kb(text, reply_markup) -> awaitable[bool]; for messages with buttons.
+        self._send_kb = send_kb or self._default_send_kb
         self._session_factory = session_factory
         self._alerted: set[tuple[str, str]] = set()  # (date, reason) dedup
         # Ticket set from the previous cycle — used to detect opens/closes.
@@ -138,6 +152,9 @@ class AccountWorker:
 
     async def _notify_user(self, text: str) -> bool:
         return await bot_client.send_message(self.telegram_id, text)
+
+    async def _default_send_kb(self, text: str, reply_markup: dict) -> bool:
+        return await bot_client.send_message(self.telegram_id, text, reply_markup=reply_markup)
 
     async def _post_channel_event(self, kind: str) -> None:
         """Post an anonymized enforcement event to the marketing channel, once
@@ -215,17 +232,86 @@ class AccountWorker:
             existing = await repo.get_trade_by_ticket(session, self.user_id, pos.ticket)
             if existing is not None:
                 continue  # already recorded (e.g. worker restarted)
+            gated = settings.pretrade_gate_enabled
             trade = await repo.open_trade(
                 session, self.user_id,
                 ticket=pos.ticket, symbol=pos.symbol, direction=pos.direction,
                 volume=pos.volume, entry_price=pos.price_open,
                 sl=pos.sl if pos.sl else None,
                 tp=pos.tp if pos.tp else None,
-                opened_at=pos.time,
+                opened_at=pos.time, gated=gated,
             )
             self._new_position_opened_at = pos.time  # for revenge detection
-            await self.notify(self._entry_prompt(pos))
-            log.info("journal: new trade %s (ticket=%s)", trade.id, pos.ticket)
+            if gated:
+                await self._send_gate_prompt(trade, pos)  # ask qualifying questions
+            else:
+                await self.notify(self._entry_prompt(pos))
+            log.info("journal: new trade %s (ticket=%s, gated=%s)", trade.id, pos.ticket, gated)
+
+    async def _send_gate_prompt(self, trade, pos) -> None:
+        mins = max(1, settings.gate_timeout_seconds // 60)
+        text = (
+            f"🔔 <b>New trade — confirm to keep it</b>\n"
+            f"<b>{pos.symbol}</b> {pos.direction} {pos.volume} @ {pos.price_open}\n\n"
+            f"⏱ Answer within <b>{mins} min</b> or it will be closed.\n\n"
+            f"<b>1/2 — Entry / confirmation timeframe?</b>"
+        )
+        await self._send_kb(text, _gate_tf_keyboard(trade.id))
+
+    async def _process_gate(self, session, positions) -> None:
+        """Pre-trade gate: time out unanswered gates and close flagged trades."""
+        if not settings.pretrade_gate_enabled:
+            return
+        live = settings.is_live_enforcement
+        now = datetime.now(tz=timezone.utc)
+        current = {p.ticket for p in positions}
+
+        # 1. Timeout — pending gates not answered within the window.
+        for t in await repo.get_pending_gate_trades(session, self.user_id):
+            start = t.entry_prompted_at or t.opened_at
+            if start is None:
+                continue
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=timezone.utc)
+            if (now - start).total_seconds() >= settings.gate_timeout_seconds:
+                t.gate_status = "failed"
+                t.close_requested = True
+                await session.commit()
+                mins = max(1, settings.gate_timeout_seconds // 60)
+                await self.notify(
+                    f"⏱ No confirmation for your <b>{t.symbol}</b> trade within {mins} min "
+                    f"— closing it (failed the pre-trade gate)."
+                )
+
+        # 2. Close trades the gate flagged (failed/timeout).
+        for t in await repo.get_close_requested_trades(session, self.user_id):
+            if t.ticket not in current:  # already gone — just clear the flag
+                t.close_requested = False
+                t.status = "gate_closed"
+                await session.commit()
+                continue
+            if not live:
+                await repo.add_risk_event(
+                    session, self.user_id, "GATE_CLOSE_DRYRUN",
+                    f"would close {t.symbol} #{t.ticket} (gate fail)",
+                )
+                t.close_requested = False
+                t.status = "gate_closed"
+                await session.commit()
+                continue
+            try:
+                res = self.broker.close_position(t.ticket)
+                t.close_requested = False
+                t.status = "gate_closed"
+                await session.commit()
+                await repo.add_risk_event(
+                    session, self.user_id, "GATE_CLOSE", f"{t.symbol} #{t.ticket}: {res}"
+                )
+                await self.notify(f"🚪 Closed <b>{t.symbol}</b> — it failed the pre-trade gate.")
+            except Exception as exc:  # noqa: BLE001
+                if "10027" in str(exc) or "AutoTrading" in str(exc):
+                    await self._alert_algo_disabled(session)
+                log.warning("gate close failed for %s #%s: %s", t.symbol, t.ticket, exc)
 
     async def _handle_closed_positions(self, session, current_positions) -> None:
         """Detect positions that closed since last cycle → close_trade + exit prompt."""
@@ -427,10 +513,11 @@ class AccountWorker:
         async with self._session_factory() as session:
             await repo.upsert_snapshot(session, self.user_id, status, yesterday_json=yesterday_json)
 
-        # V3 — journal: detect new opens, detect closes, send reminders.
+        # V3 — journal + V4.1 pre-trade gate: detect opens, gate, closes, reminders.
         try:
             async with self._session_factory() as session:
                 await self._handle_new_positions(session, status.open_positions)
+                await self._process_gate(session, status.open_positions)
                 await self._handle_closed_positions(session, status.open_positions)
                 await self._process_journal_reminders(session)
         except Exception as exc:  # noqa: BLE001
