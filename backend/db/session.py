@@ -57,6 +57,9 @@ _SQLITE_COLUMN_ADDS = [
     ("trades", "entry_timeframe", "ALTER TABLE trades ADD COLUMN entry_timeframe VARCHAR(8)"),
     ("trades", "used_tradingview", "ALTER TABLE trades ADD COLUMN used_tradingview BOOLEAN"),
     ("trades", "close_requested", "ALTER TABLE trades ADD COLUMN close_requested BOOLEAN DEFAULT 0"),
+    ("trades", "session", "ALTER TABLE trades ADD COLUMN session VARCHAR(24)"),
+    ("trades", "exit_reason", "ALTER TABLE trades ADD COLUMN exit_reason VARCHAR(8)"),
+    ("trade_journals", "lesson", "ALTER TABLE trade_journals ADD COLUMN lesson TEXT"),
     # V3/V4 — emotion_scores and trade journal tables created by create_all on first run.
 ]
 

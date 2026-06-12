@@ -390,21 +390,14 @@ async def test_worker_prompted_exit_journal_resumes_from_db():
             closed_at=datetime.now(tz=timezone.utc),
         )
     sent.clear()
-    # User answers the worker's "why did you exit?" prompt with no in-memory FSM.
-    await d.handle(telegram_id=55, username="t", text="manual")
-    # Must advance to question 2/5, NOT reply "Type /menu".
-    assert any("2/5" in t for _, t in sent), [t for _, t in sent]
+    # Exit journal is now ONE question (the lesson). A free-text reply with no
+    # in-memory FSM must resume from the DB and save the lesson.
+    await d.handle(telegram_id=55, username="t", text="I exited too early out of fear")
     assert not any("Type /menu" in t for _, t in sent)
-    # Finish the remaining steps; journal should save.
-    await d.handle(telegram_id=55, username="t", text="yes")       # plan
-    await d.handle(telegram_id=55, username="t", text="none")      # mistakes
-    await d.handle(telegram_id=55, username="t", text="calm")      # emotion
-    await d.handle(telegram_id=55, username="t", text="4")         # rating
     async with Session() as s:
-        user = await repo.get_user(s, 55)
         j = await repo.get_journal_for_trade(s, trade.id, "exit")
         assert j is not None and not j.skipped
-        assert j.exit_reason == "manual" and j.rating == 4
+        assert "too early" in (j.lesson or "")
 
 
 async def test_coach_daily_quota():

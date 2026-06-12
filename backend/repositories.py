@@ -499,7 +499,7 @@ async def open_trade(
     session: AsyncSession, user_id: int, *,
     ticket: int, symbol: str, direction: str, volume: float,
     entry_price: float, sl: float | None, tp: float | None, opened_at: datetime,
-    gated: bool = False,
+    gated: bool = False, session_name: str | None = None,
 ) -> Trade:
     trade = Trade(
         user_id=user_id, ticket=ticket, symbol=symbol,
@@ -507,6 +507,7 @@ async def open_trade(
         sl=sl, tp=tp, opened_at=opened_at, status="open",
         entry_prompted_at=_utcnow(),
         gate_status="pending" if gated else "passed",
+        session=session_name,
     )
     session.add(trade)
     await session.commit()
@@ -553,11 +554,13 @@ async def get_close_requested_trades(session: AsyncSession, user_id: int) -> lis
 async def close_trade(
     session: AsyncSession, trade: Trade, *,
     exit_price: float, profit: float, closed_at: datetime,
+    exit_reason: str | None = None,
 ) -> Trade:
     trade.exit_price = exit_price
     trade.profit = profit
     trade.closed_at = closed_at
     trade.status = "closed"
+    trade.exit_reason = exit_reason   # auto-detected (tp | sl | manual)
     trade.exit_prompted_at = _utcnow()
     if trade.opened_at:
         opened = trade.opened_at
@@ -647,12 +650,12 @@ async def skip_exit_journal(session: AsyncSession, trade: Trade) -> TradeJournal
 
 async def save_entry_journal(
     session: AsyncSession, trade: Trade, *,
-    setup_reason: str, emotion: str, plan_followed: str, confidence: int,
+    setup_reason: str, mistakes: str = "",
 ) -> TradeJournal:
+    """Entry journal: strategy + timeframe used (setup_reason) and any mistakes."""
     journal = TradeJournal(
         trade_id=trade.id, user_id=trade.user_id, type="entry",
-        setup_reason=setup_reason, emotion_entry=emotion,
-        plan_followed=plan_followed, confidence=confidence,
+        setup_reason=setup_reason, mistakes=mistakes,
     )
     session.add(journal)
     await session.flush()
@@ -663,14 +666,12 @@ async def save_entry_journal(
 
 
 async def save_exit_journal(
-    session: AsyncSession, trade: Trade, *,
-    exit_reason: str, plan_followed: str, mistakes: str,
-    emotion: str, rating: int,
+    session: AsyncSession, trade: Trade, *, lesson: str,
 ) -> TradeJournal:
+    """Exit journal: a single 'what did you learn?' reflection. Exit reason,
+    session and duration are captured automatically (no question)."""
     journal = TradeJournal(
-        trade_id=trade.id, user_id=trade.user_id, type="exit",
-        exit_reason=exit_reason, plan_followed_exit=plan_followed,
-        mistakes=mistakes, emotion_exit=emotion, rating=rating,
+        trade_id=trade.id, user_id=trade.user_id, type="exit", lesson=lesson,
     )
     session.add(journal)
     await session.flush()

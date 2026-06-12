@@ -489,9 +489,9 @@ class BotDispatcher:
         await self._gate_edit(
             telegram_id, message_id,
             "✅ <b>Gate passed</b> — trade approved.\n\n"
-            "📝 <b>Entry Journal (1/4)</b>\n"
-            "What's your setup / reason for this trade?\n"
-            "<i>(e.g. London breakout, support bounce, trend continuation)</i>",
+            "📝 <b>Entry Journal (1/2)</b>\n"
+            "What's your entry strategy &amp; timeframe used?\n"
+            "<i>(e.g. London breakout, 15m confirmation)</i>",
         )
 
     async def _status(self, telegram_id, username, arg) -> None:
@@ -1076,18 +1076,19 @@ class BotDispatcher:
         exit_j = await repo.get_journal_for_trade(session, trade.id, "exit")
         profit_str = f"{trade.profit:+.2f}" if trade.profit is not None else "open"
         dur = _fmt_duration(trade.duration_s)
+        reason = (trade.exit_reason or "—").upper()
+        sess = trade.session or "—"
         lines = [
             f"📓 <b>Trade #{trade.id} — {_esc(trade.symbol)} {_esc(trade.direction)}</b>",
-            f"P&amp;L: <b>{_esc(profit_str)}</b> | Duration: {dur}",
+            f"P&amp;L: <b>{_esc(profit_str)}</b> · Exit: {reason} · {dur} · {_esc(sess)}",
+            f"Timeframe: {_esc(trade.entry_timeframe or '—')}",
             "",
         ]
         if entry and not entry.skipped:
             lines += [
                 "<b>Entry</b>",
-                f"• Setup: <i>{_esc(entry.setup_reason or '—')}</i>",
-                f"• Emotion: {_esc(entry.emotion_entry or '—')} | "
-                f"Plan: {_esc(entry.plan_followed or '—')} | "
-                f"Confidence: {entry.confidence or '—'}/10",
+                f"• Strategy: <i>{_esc(entry.setup_reason or '—')}</i>",
+                f"• Mistakes: <i>{_esc(entry.mistakes or 'none')}</i>",
                 "",
             ]
         elif entry and entry.skipped:
@@ -1095,11 +1096,7 @@ class BotDispatcher:
         if exit_j and not exit_j.skipped:
             lines += [
                 "<b>Exit</b>",
-                f"• Reason: {_esc(exit_j.exit_reason or '—')} | "
-                f"Plan: {_esc(exit_j.plan_followed_exit or '—')}",
-                f"• Mistakes: <i>{_esc(exit_j.mistakes or 'none')}</i>",
-                f"• Emotion: {_esc(exit_j.emotion_exit or '—')} | "
-                f"Rating: {'⭐' * (exit_j.rating or 0) or '—'}",
+                f"• Lesson: <i>{_esc(exit_j.lesson or '—')}</i>",
             ]
         elif exit_j and exit_j.skipped:
             lines.append("<b>Exit</b>: ⚠️ skipped")
@@ -1223,9 +1220,8 @@ class BotDispatcher:
             await self.send(
                 telegram_id,
                 f"📝 <b>Entry Journal — #{trade.id} {_esc(trade.symbol)} {_esc(trade.direction)}</b>\n\n"
-                f"<b>1/4 — Setup &amp; reason</b>\n"
-                f"What was your setup / reason for entering this trade?\n"
-                f"<i>(Be specific: e.g. 'London open breakout above key resistance, trend continuation')</i>",
+                f"<b>1/2 — Entry strategy &amp; timeframe used?</b>\n"
+                f"<i>(e.g. 'London breakout, 15m confirmation on TradingView')</i>",
             )
         elif needs_exit:
             self.states[telegram_id] = {
@@ -1237,21 +1233,20 @@ class BotDispatcher:
             profit = trade.profit or 0.0
             dur = _fmt_duration(trade.duration_s)
             emoji = "✅" if profit >= 0 else "❌"
+            reason = (trade.exit_reason or "manual").upper()
             await self.send(
                 telegram_id,
                 f"📝 <b>Exit Journal — #{trade.id} {_esc(trade.symbol)} {_esc(trade.direction)}</b>\n"
-                f"{emoji} P&amp;L: <b>{profit:+.2f}</b> | Duration: {dur}\n\n"
-                f"<b>1/5 — Exit reason</b>\n"
-                f"Why did you exit?\n"
-                f"Reply: <b>tp</b> · <b>sl</b> · <b>manual</b> · <b>partial</b>",
+                f"{emoji} Exit: <b>{reason}</b> | P&amp;L: <b>{profit:+.2f}</b> | {dur}\n\n"
+                f"<b>What did you learn from this {dur} trade?</b>\n"
+                f"<i>(one sentence — then send a TradingView screenshot)</i>",
             )
         else:
             await self.send(telegram_id, f"✅ Trade #{trade.id} is already fully journaled.")
 
     # ------------------------------------------------------- entry journal FSM
-    _ENTRY_STEPS = ["setup", "emotion", "plan", "confidence"]
-    _EMOTIONS = {"calm", "frustrated", "anxious", "greedy", "neutral", "scared",
-                 "disciplined", "stressed", "excited", "fearful"}
+    # Entry journal: 2 questions — strategy+timeframe, then mistakes.
+    _ENTRY_STEPS = ["strategy", "mistakes"]
 
     async def _entry_journal_step(self, telegram_id: int, text: str) -> None:
         state = self.states.get(telegram_id)
@@ -1259,199 +1254,64 @@ class BotDispatcher:
             return
         step = self._ENTRY_STEPS[state["step"]]
         data = state["data"]
-        t = text.strip().lower()
 
-        if step == "setup":
-            if len(text.strip()) < 5:
-                await self.send(telegram_id, "Please be more specific (at least a few words).")
+        if step == "strategy":
+            if len(text.strip()) < 3:
+                await self.send(telegram_id, "Please describe your strategy &amp; timeframe (a few words).")
                 return
-            data["setup_reason"] = text.strip()
+            data["strategy"] = text.strip()
             state["step"] = 1
             await self.send(
                 telegram_id,
-                "<b>2/4 — Emotion at entry</b>\n"
-                "How were you feeling when you entered?\n"
-                "Reply: <b>calm</b> · <b>excited</b> · <b>greedy</b> · <b>anxious</b> "
-                "· <b>fearful</b> · <b>frustrated</b> · <b>disciplined</b> · <b>neutral</b>",
+                "<b>2/2 — Any mistakes on this entry?</b>\n"
+                "<i>e.g. chased price, no confirmation, oversized — or reply <b>none</b></i>",
             )
+            return
 
-        elif step == "emotion":
-            if t not in self._EMOTIONS:
-                await self.send(
-                    telegram_id,
-                    f"Please choose one: calm · excited · greedy · anxious · fearful "
-                    f"· frustrated · disciplined · neutral\n(you typed: {_esc(text)})",
+        # step == "mistakes" → save and finish.
+        mistakes = "" if text.strip().lower() == "none" else text.strip()
+        self.states.pop(telegram_id, None)
+        async with self._sf() as session:
+            user = await repo.get_user(session, telegram_id)
+            trade = await repo.get_trade_by_id(session, state["trade_id"])
+            if user and trade and trade.user_id == user.id:
+                await repo.save_entry_journal(
+                    session, trade, setup_reason=data["strategy"], mistakes=mistakes,
                 )
-                return
-            data["emotion"] = t
-            state["step"] = 2
-            await self.send(
-                telegram_id,
-                "<b>3/4 — Did this follow your trading plan?</b>\n"
-                "Reply: <b>yes</b> · <b>mostly</b> · <b>no</b>",
-            )
-
-        elif step == "plan":
-            if t not in ("yes", "mostly", "no"):
-                await self.send(telegram_id, "Reply yes · mostly · no")
-                return
-            data["plan_followed"] = t
-            state["step"] = 3
-            await self.send(
-                telegram_id,
-                "<b>4/4 — Confidence level (1–10)</b>\n"
-                "How confident were you in this trade? (1 = very unsure, 10 = very confident)",
-            )
-
-        elif step == "confidence":
-            try:
-                v = int(t)
-                assert 1 <= v <= 10
-            except (ValueError, AssertionError):
-                await self.send(telegram_id, "Please reply a number from 1 to 10.")
-                return
-            data["confidence"] = v
-            self.states.pop(telegram_id, None)
-
-            async with self._sf() as session:
-                user = await repo.get_user(session, telegram_id)
-                trade = await repo.get_trade_by_id(session, state["trade_id"])
-                if user and trade and trade.user_id == user.id:
-                    await repo.save_entry_journal(
-                        session, trade,
-                        setup_reason=data["setup_reason"],
-                        emotion=data["emotion"],
-                        plan_followed=data["plan_followed"],
-                        confidence=data["confidence"],
-                    )
-            plan_note = {
-                "yes": "✅ Great — following the plan is the key to consistency.",
-                "mostly": "⚠️ Partial plan adherence — review what deviated next time.",
-                "no": "❌ Off-plan trade — be honest with yourself: was this emotion-driven?",
-            }.get(data["plan_followed"], "")
-            await self.send(
-                telegram_id,
-                f"✅ <b>Entry journal saved!</b>\n\n"
-                f"Setup: <i>{_esc(data['setup_reason'])}</i>\n"
-                f"Emotion: {_esc(data['emotion'])} | Plan: {_esc(data['plan_followed'])} "
-                f"| Confidence: {data['confidence']}/10\n\n"
-                f"{plan_note}\n\n"
-                f"<i>I'll ask for your exit journal when the trade closes.</i>",
-            )
+        await self.send(
+            telegram_id,
+            "✅ <b>Entry journal saved.</b>\n"
+            f"Strategy: <i>{_esc(data['strategy'])}</i>\n"
+            + (f"Mistakes: <i>{_esc(mistakes)}</i>\n" if mistakes else "")
+            + "<i>I'll ask one question when the trade closes.</i>",
+        )
 
     # -------------------------------------------------------- exit journal FSM
-    _EXIT_STEPS = ["exit_reason", "plan", "mistakes", "emotion", "rating"]
-    _EXIT_REASONS = {"tp", "sl", "manual", "partial"}
-    _EXIT_EMOTIONS = _EMOTIONS
+    # Exit journal: 1 question — what did you learn — then a screenshot.
+    _EXIT_STEPS = ["lesson"]
 
     async def _exit_journal_step(self, telegram_id: int, text: str) -> None:
         state = self.states.get(telegram_id)
         if not state:
             return
-        step = self._EXIT_STEPS[state["step"]]
-        data = state["data"]
-        t = text.strip().lower()
-
-        if step == "exit_reason":
-            if t not in self._EXIT_REASONS:
-                await self.send(telegram_id, "Reply: tp · sl · manual · partial")
-                return
-            data["exit_reason"] = t
-            state["step"] = 1
-            await self.send(
-                telegram_id,
-                "<b>2/5 — Did you follow your entry plan?</b>\n"
-                "Reply: <b>yes</b> · <b>mostly</b> · <b>no</b>",
-            )
-
-        elif step == "plan":
-            if t not in ("yes", "mostly", "no"):
-                await self.send(telegram_id, "Reply yes · mostly · no")
-                return
-            data["plan_followed"] = t
-            state["step"] = 2
-            await self.send(
-                telegram_id,
-                "<b>3/5 — Any mistakes?</b>\n"
-                "Be honest: did you move the SL, close early, FOMO in, revenge trade, "
-                "hold too long, or deviate from the plan?\n"
-                "<i>Type your mistakes, or reply <b>none</b></i>",
-            )
-
-        elif step == "mistakes":
-            data["mistakes"] = text.strip() if t != "none" else ""
-            state["step"] = 3
-            await self.send(
-                telegram_id,
-                "<b>4/5 — Emotion during the trade</b>\n"
-                "How did you feel while the trade was running?\n"
-                "Reply: <b>calm</b> · <b>excited</b> · <b>greedy</b> · <b>anxious</b> "
-                "· <b>fearful</b> · <b>frustrated</b> · <b>disciplined</b> · <b>neutral</b>",
-            )
-
-        elif step == "emotion":
-            if t not in self._EXIT_EMOTIONS:
-                await self.send(
-                    telegram_id,
-                    "Please choose: calm · excited · greedy · anxious · fearful "
-                    "· frustrated · disciplined · neutral",
-                )
-                return
-            data["emotion"] = t
-            state["step"] = 4
-            await self.send(
-                telegram_id,
-                "<b>5/5 — Rate this trade (1–5 ⭐)</b>\n"
-                "Rate your <b>decision quality</b>, not the outcome:\n"
-                "1 = terrible decision  |  3 = average  |  5 = perfect execution",
-            )
-
-        elif step == "rating":
-            try:
-                v = int(t.replace("⭐", "").strip())
-                assert 1 <= v <= 5
-            except (ValueError, AssertionError):
-                await self.send(telegram_id, "Please reply a number from 1 to 5.")
-                return
-            data["rating"] = v
-            self.states.pop(telegram_id, None)
-
-            async with self._sf() as session:
-                user = await repo.get_user(session, telegram_id)
-                trade = await repo.get_trade_by_id(session, state["trade_id"])
-                if user and trade and trade.user_id == user.id:
-                    await repo.save_exit_journal(
-                        session, trade,
-                        exit_reason=data["exit_reason"],
-                        plan_followed=data["plan_followed"],
-                        mistakes=data.get("mistakes", ""),
-                        emotion=data["emotion"],
-                        rating=data["rating"],
-                    )
-
-            # Feedback based on answers.
-            feedback = []
-            if data["plan_followed"] == "no":
-                feedback.append("⚠️ Off-plan exit — reflect on what triggered the deviation.")
-            if data.get("mistakes"):
-                feedback.append(f"📌 Mistakes noted: <i>{_esc(data['mistakes'])}</i> — review these in your weekly session.")
-            if data["emotion"] in ("greedy", "fearful", "frustrated", "anxious"):
-                feedback.append(f"🧠 Emotion was <b>{data['emotion']}</b> — high-emotion exits often lead to regret. Track the pattern.")
-            if data["rating"] >= 4:
-                feedback.append("🌟 High-quality execution — this is what consistency looks like.")
-            if not feedback:
-                feedback.append("Good job journaling. Every entry builds your self-awareness.")
-
-            stars = "⭐" * data["rating"]
-            await self.send(
-                telegram_id,
-                f"✅ <b>Exit journal saved!</b> {stars}\n\n"
-                f"Exit: {_esc(data['exit_reason'])} | Plan: {_esc(data['plan_followed'])} "
-                f"| Emotion: {_esc(data['emotion'])}\n\n"
-                + "\n".join(feedback) +
-                f"\n\n📷 <i>Send a chart screenshot now to attach it to trade "
-                f"#{state['trade_id']}.</i>\n<i>Use /journal to see all your trades.</i>",
-            )
+        if len(text.strip()) < 3:
+            await self.send(telegram_id, "Please share a sentence on what you learned.")
+            return
+        lesson = text.strip()
+        self.states.pop(telegram_id, None)
+        trade_id = state["trade_id"]
+        async with self._sf() as session:
+            user = await repo.get_user(session, telegram_id)
+            trade = await repo.get_trade_by_id(session, trade_id)
+            if user and trade and trade.user_id == user.id:
+                await repo.save_exit_journal(session, trade, lesson=lesson)
+        await self.send(
+            telegram_id,
+            "✅ <b>Exit journal saved.</b>\n"
+            f"Lesson: <i>{_esc(lesson)}</i>\n\n"
+            f"📷 Now send a <b>TradingView screenshot</b> of this trade to attach it "
+            f"(trade #{trade_id}).",
+        )
 
     async def _risk(self, telegram_id, username, arg) -> None:
         async with self._sf() as session:

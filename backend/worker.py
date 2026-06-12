@@ -72,6 +72,24 @@ def _trading_session(hour: int) -> str:
     return "/".join(sessions) if sessions else "Off-hours"
 
 
+def _detect_exit_reason(trade, exit_price: float) -> str:
+    """Infer how a trade closed: 'tp', 'sl', or 'manual'.
+
+    Compares the exit price to the stored SL/TP within a small relative
+    tolerance (covers normal slippage). No SL/TP set → 'manual'.
+    """
+    tp = getattr(trade, "tp", None)
+    sl = getattr(trade, "sl", None)
+    if not exit_price:
+        return "manual"
+    tol = abs(exit_price) * 0.0007  # ~7 pips on a 1.0xxx FX pair
+    if tp and abs(exit_price - tp) <= tol:
+        return "tp"
+    if sl and abs(exit_price - sl) <= tol:
+        return "sl"
+    return "manual"
+
+
 def _fmt_duration(secs: int | None) -> str:
     if secs is None or secs < 0:
         return "open"
@@ -207,17 +225,16 @@ class AccountWorker:
             f"<i>(e.g. London breakout, support bounce, trend continuation)</i>"
         )
 
-    def _exit_prompt(self, trade, pos_data: dict) -> str:
-        profit = pos_data.get("profit", 0.0)
-        dur = _fmt_duration(pos_data.get("duration_s"))
+    def _exit_prompt(self, trade, profit: float) -> str:
+        dur = _fmt_duration(trade.duration_s)
         emoji = "✅" if profit >= 0 else "❌"
+        reason = (trade.exit_reason or "manual").upper()
+        sess = f" · {trade.session}" if trade.session else ""
         return (
-            f"{emoji} <b>Trade closed</b>\n"
-            f"<b>{trade.symbol}</b> {trade.direction} | "
-            f"P&L: <b>{profit:+.2f}</b> | Duration: {dur}\n\n"
-            f"📝 <b>Exit Journal (1/5)</b>\n"
-            f"Why did you exit?\n"
-            f"Reply: <b>tp</b> · <b>sl</b> · <b>manual</b> · <b>partial</b>"
+            f"{emoji} <b>Trade closed</b> — {trade.symbol} {trade.direction}\n"
+            f"Exit: <b>{reason}</b> · P&L: <b>{profit:+.2f}</b> · {dur}{sess}\n\n"
+            f"📝 <b>One question:</b> what did you learn from this {dur} trade?\n"
+            f"<i>(reply in a sentence — then send a TradingView screenshot)</i>"
         )
 
     async def _handle_new_positions(self, session, current_positions) -> None:
@@ -233,13 +250,19 @@ class AccountWorker:
             if existing is not None:
                 continue  # already recorded (e.g. worker restarted)
             gated = settings.pretrade_gate_enabled
+            # Auto-capture the trading session from the entry time (in real UTC).
+            try:
+                actual_utc = pos.time - self.broker.get_server_offset()
+                session_name = _trading_session(actual_utc.hour)
+            except Exception:  # noqa: BLE001
+                session_name = None
             trade = await repo.open_trade(
                 session, self.user_id,
                 ticket=pos.ticket, symbol=pos.symbol, direction=pos.direction,
                 volume=pos.volume, entry_price=pos.price_open,
                 sl=pos.sl if pos.sl else None,
                 tp=pos.tp if pos.tp else None,
-                opened_at=pos.time, gated=gated,
+                opened_at=pos.time, gated=gated, session_name=session_name,
             )
             self._new_position_opened_at = pos.time  # for revenge detection
             if gated:
@@ -335,19 +358,18 @@ class AccountWorker:
             exit_price = deal.price if deal else trade.entry_price
             profit = deal.profit if deal else 0.0
             closed_at = deal.time if deal else datetime.now(tz=timezone.utc)
+            exit_reason = _detect_exit_reason(trade, exit_price)  # tp | sl | manual
             trade = await repo.close_trade(
                 session, trade,
                 exit_price=exit_price, profit=profit, closed_at=closed_at,
+                exit_reason=exit_reason,
             )
             # Track last losing close for revenge detection next cycle.
             if profit < 0:
                 self._last_loss_closed_at = closed_at
-            pos_data = {
-                "profit": profit,
-                "duration_s": trade.duration_s,
-            }
-            await self.notify(self._exit_prompt(trade, pos_data))
-            log.info("journal: closed trade %s (ticket=%s) P&L=%s", trade.id, ticket, profit)
+            await self.notify(self._exit_prompt(trade, profit))
+            log.info("journal: closed trade %s (ticket=%s) P&L=%s reason=%s",
+                     trade.id, ticket, profit, exit_reason)
 
     async def _process_journal_reminders(self, session) -> None:
         """Re-prompt or skip unjournaled trades based on time elapsed."""
@@ -396,11 +418,10 @@ class AccountWorker:
                     )
                 elif count < len(self._REMINDER_MINUTES) and elapsed_m >= self._REMINDER_MINUTES[count]:
                     await repo.bump_exit_reminder(session, trade)
-                    pos_data = {"profit": trade.profit or 0.0, "duration_s": trade.duration_s}
                     await self.notify(
                         f"📝 Reminder #{count + 1}: still waiting for your <b>exit journal</b> "
                         f"on {trade.symbol} {trade.direction}.\n"
-                        + self._exit_prompt(trade, pos_data)
+                        + self._exit_prompt(trade, trade.profit or 0.0)
                     )
 
     async def _run_psychology_cycle(self, session, server_date: str, since) -> None:

@@ -202,6 +202,10 @@ class Trade(Base):
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     duration_s: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Auto-captured (no question asked): trading session at entry, and how the
+    # trade closed (tp | sl | manual), inferred from exit price vs SL/TP.
+    session: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    exit_reason: Mapped[str | None] = mapped_column(String(8), nullable=True)
     # Journal linkage.
     entry_journal_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     exit_journal_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -280,6 +284,8 @@ class TradeJournal(Base):
     mistakes: Mapped[str | None] = mapped_column(Text, nullable=True)
     emotion_exit: Mapped[str | None] = mapped_column(String(32), nullable=True)
     rating: Mapped[int | None] = mapped_column(Integer, nullable=True)            # 1–5
+    # What the trader learned from the trade (the single exit-journal question).
+    lesson: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     skipped: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
