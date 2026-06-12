@@ -525,6 +525,9 @@ class BotDispatcher:
         else:
             lines.append("MT5: <i>not linked</i> — use /link")
         lines.append(f"Trading: {'🔒 LOCKED' if lock.locked else '🟢 unlocked'}")
+        if lock.locked and lock.reason:
+            lines.append(f"   ↳ <i>{_esc(lock.reason)}</i>")
+            lines.append("   <i>(clears at the next trading day)</i>")
 
         # Live data from the worker's latest snapshot.
         if snap is not None:
